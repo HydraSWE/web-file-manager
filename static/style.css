@@ -1,0 +1,139 @@
+/* ============================================================
+   Modern Dark Theme - Mobile Web File Manager
+   ============================================================ */
+
+@import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&display=swap');
+
+:root {
+  --surface-window: #090d16;
+  --surface-panel: #0d1527;
+  --surface-card: #0f1a30;
+  --surface-input: #16223b;
+  --surface-hover: #132038;
+  
+  --border-subtle: #1e293b;
+  --border-strong: #2d3e63;
+  --border-focus: #2864dc;
+  
+  --color-accent-blue: #2864dc;
+  --color-accent-cyan: #3daee9;
+  --color-accent-glow: rgba(40, 100, 220, 0.35);
+  
+  --text-primary: #f8fafc;
+  --text-muted: #94a3b8;
+  --text-subtle: #64748b;
+  
+  --font-ui: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  --font-mono: 'JetBrains Mono', Consolas, ui-monospace, monospace;
+}
+
+body {
+  background-color: var(--surface-window);
+  font-family: var(--font-ui);
+  color: var(--text-primary);
+  min-height: 100vh;
+  -webkit-tap-highlight-color: transparent;
+  overscroll-behavior-y: none;
+}
+
+/* Modal Open: Completely Lock Body Scrolling */
+body.modal-open {
+  overflow: hidden !important;
+  touch-action: none;
+}
+
+/* Background Ambient Radial Glow */
+.banner-gradient {
+  background: radial-gradient(circle at 50% 0%, rgba(40, 100, 220, 0.12) 0%, rgba(9, 13, 22, 0.85) 50%, rgba(9, 13, 22, 0.98) 100%);
+}
+
+.glow-hydra {
+  box-shadow: 0 0 35px -5px rgba(40, 100, 220, 0.35);
+}
+
+.glow-card:hover {
+  box-shadow: 0 0 30px -5px rgba(61, 174, 233, 0.25);
+  border-color: #2864dc80;
+}
+
+/* Custom Scrollbars */
+::-webkit-scrollbar {
+  width: 5px;
+  height: 5px;
+}
+::-webkit-scrollbar-track {
+  background: var(--surface-window);
+}
+::-webkit-scrollbar-thumb {
+  background: #1e293b;
+  border-radius: 9999px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #334155;
+}
+
+/* Dark Input Styling (from UI_GUIDELINES.md) */
+input:not([type="checkbox"]):not([type="radio"]):not([type="color"]):not([type="file"]),
+textarea {
+  background-color: var(--surface-input);
+  border: 1px solid var(--border-subtle);
+  color: var(--text-primary);
+  font-family: var(--font-ui);
+  outline: none;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease, background-color 0.15s ease;
+}
+
+input:not([type="checkbox"]):not([type="radio"]):not([type="color"]):not([type="file"]):hover:not(:disabled),
+textarea:hover:not(:disabled) {
+  border-color: var(--border-strong);
+}
+
+input:not([type="checkbox"]):not([type="radio"]):not([type="color"]):not([type="file"]):focus-visible,
+textarea:focus-visible {
+  border-color: var(--border-focus);
+  box-shadow: 0 0 0 2px var(--color-accent-glow);
+}
+
+/* Safe areas for mobile notches */
+.safe-bottom {
+  padding-bottom: env(safe-area-inset-bottom, 16px);
+}
+.safe-top {
+  padding-top: env(safe-area-inset-top, 16px);
+}
+
+/* Touch active scale feedback */
+.touch-press:active {
+  transform: scale(0.97);
+  transition: transform 0.08s ease-in-out;
+}
+
+/* Shimmer Loading Animation */
+@keyframes shimmerWave {
+  0% { background-position: -200% 0; }
+  100% { background-position: 200% 0; }
+}
+
+.shimmer-active {
+  background: linear-gradient(90deg, rgba(255,255,255,0.02) 25%, rgba(40,100,220,0.12) 50%, rgba(255,255,255,0.02) 75%);
+  background-size: 200% 100%;
+  animation: shimmerWave 1.8s infinite;
+}
+
+/* Pinch-to-zoom interactive viewport */
+.pinch-viewport {
+  touch-action: none;
+  user-select: none;
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  height: 100%;
+}
+
+.pinch-image {
+  transform-origin: center center;
+  will-change: transform;
+  transition: transform 0.05s ease-out;
+}

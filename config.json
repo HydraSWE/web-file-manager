@@ -1,0 +1,11 @@
+{
+  "app_name": "Web File Manager",
+  "app_icon": "",
+  "port": 8080,
+  "host": "0.0.0.0",
+  "root_path": "",
+  "pin": "",
+  "allow_recycle_bin": true,
+  "allow_permanent_delete": true,
+  "show_hidden_files": false
+}
