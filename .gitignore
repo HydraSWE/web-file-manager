@@ -53,3 +53,7 @@ desktop.ini
 *.temp
 archive_*.zip
 top_bar.png
+
+# User runtime state
+favorites.json
+.sessions.json

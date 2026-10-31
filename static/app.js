@@ -13,7 +13,12 @@ const STATE = {
   selectedPaths: new Set(),
   clipboard: JSON.parse(localStorage.getItem('wfm_clipboard') || 'null'), // { sources: [], isCut: false }
   viewMode: localStorage.getItem('wfm_viewMode') || 'grid', // 'grid' | 'list'
+  sortBy: localStorage.getItem('wfm_sortBy') || 'name', // 'name' | 'date' | 'size' | 'type'
+  sortOrder: localStorage.getItem('wfm_sortOrder') || 'asc', // 'asc' | 'desc' 
   categoryFilter: 'all',
+  favorites: [],
+  favoritePaths: new Set(),
+  previewItem: null,
   searchQuery: '',
   contextItem: null,
   isSelectMode: false,
@@ -42,6 +47,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   setupDragAndDrop();
   updateViewToggleUI();
   updateClipboardUI();
+  setupClipboardButtonInteractions();
 
   // Check auth requirement & configuration
   try {
@@ -63,14 +69,28 @@ document.addEventListener('DOMContentLoaded', async () => {
       }
     }
 
-    if (config.auth_required && !STATE.authToken) {
-      showAuthModal();
-      return;
+    if (config.auth_required) {
+      let tokenValid = false;
+      if (STATE.authToken) {
+        try {
+          const checkRes = await fetch('/api/drives', {
+            headers: { 'X-Auth-Token': STATE.authToken }
+          });
+          if (checkRes.ok) tokenValid = true;
+        } catch (e) {}
+      }
+      if (!tokenValid) {
+        STATE.authToken = '';
+        localStorage.removeItem('wfm_token');
+        showAuthModal();
+        return;
+      }
     }
   } catch (err) {
     console.error('Config fetch error:', err);
   }
 
+  await fetchFavorites();
   await fetchDrives();
   await loadDirectory('');
 });
@@ -81,7 +101,7 @@ function toggleModalScrollLock(isOpen) {
     document.body.classList.add('modal-open');
   } else {
     // Only remove if no other modal is currently visible
-    const openModals = document.querySelectorAll('#previewModal:not(.hidden), #editorModal:not(.hidden), #uploadModal:not(.hidden), #inputModal:not(.hidden), #deleteModal:not(.hidden), #qrModal:not(.hidden), #authModal:not(.hidden), #contextSheet:not(.hidden)');
+    const openModals = document.querySelectorAll('#previewModal:not(.hidden), #editorModal:not(.hidden), #uploadModal:not(.hidden), #inputModal:not(.hidden), #deleteModal:not(.hidden), #qrModal:not(.hidden), #authModal:not(.hidden), #contextSheet:not(.hidden), #pasteConfirmModal:not(.hidden), #clipboardInspectorModal:not(.hidden)');
     if (openModals.length === 0) {
       document.body.classList.remove('modal-open');
     }
@@ -115,6 +135,7 @@ async function submitPinAuth() {
       document.getElementById('authModal').classList.add('hidden');
       toggleModalScrollLock(false);
       showToast(`${STATE.appName} unlocked`, 'success');
+      await fetchFavorites();
       await fetchDrives();
       await loadDirectory('');
     } else {
@@ -277,10 +298,19 @@ function renderBreadcrumbs(crumbs) {
   crumbs.forEach((crumb, idx) => {
     const isLast = idx === crumbs.length - 1;
     const btn = document.createElement('button');
-    btn.className = `px-2.5 py-1 rounded-xl text-xs flex items-center gap-1 font-semibold transition touch-press ${
+    btn.className = `px-2.5 py-1 rounded-xl text-xs flex items-center gap-1.5 font-semibold transition touch-press ${
       isLast ? 'bg-brand-500/15 text-brand-400 border border-brand-500/30' : 'text-slate-400 hover:text-white hover:bg-surface-hover'
     }`;
-    btn.textContent = crumb.name;
+
+    let iconHtml = '';
+    if (crumb.has_custom_icon) {
+      const iconUrl = `/api/fs/folder-icon?path=${encodeURIComponent(crumb.path)}&token=${STATE.authToken}`;
+      iconHtml = `<img src="${iconUrl}" class="w-3.5 h-3.5 object-contain rounded-sm shrink-0" onerror="this.remove()">`;
+    } else if (crumb.is_drive) {
+      iconHtml = `<i data-lucide="hard-drive" class="w-3 h-3 text-slate-400 shrink-0"></i>`;
+    }
+
+    btn.innerHTML = `${iconHtml}<span>${escapeHtml(crumb.name)}</span>`;
     btn.onclick = () => loadDirectory(crumb.path);
     container.appendChild(btn);
 
@@ -301,9 +331,10 @@ function renderBreadcrumbs(crumbs) {
 // ============================================================
 
 function updateFilterCounts() {
-  const counts = { all: STATE.items.length, folder: 0, image: 0, video: 0, audio: 0, code: 0, archive: 0 };
+  const counts = { all: STATE.items.length, folder: 0, image: 0, video: 0, audio: 0, code: 0, archive: 0, favorites: 0 };
   STATE.items.forEach(it => {
     if (counts[it.category] !== undefined) counts[it.category]++;
+    if (STATE.favoritePaths.has(normalizePath(it.path))) counts.favorites++;
   });
   Object.keys(counts).forEach(k => {
     const el = document.getElementById(`count_${k}`);
@@ -349,7 +380,9 @@ function setCategoryFilter(category) {
 function applyFilters() {
   let list = STATE.items;
 
-  if (STATE.categoryFilter !== 'all') {
+  if (STATE.categoryFilter === 'favorites') {
+    list = list.filter(item => STATE.favoritePaths.has(normalizePath(item.path)));
+  } else if (STATE.categoryFilter !== 'all') {
     list = list.filter(item => item.category === STATE.categoryFilter);
   }
 
@@ -358,9 +391,31 @@ function applyFilters() {
   }
 
   list.sort((a, b) => {
+    // 1. Folders first
     if (a.is_dir && !b.is_dir) return -1;
     if (!a.is_dir && b.is_dir) return 1;
-    return a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' });
+
+    // 2. Pinned items float to top of their section
+    const isPinnedA = STATE.favoritePaths.has(normalizePath(a.path));
+    const isPinnedB = STATE.favoritePaths.has(normalizePath(b.path));
+    if (isPinnedA !== isPinnedB) {
+      return isPinnedA ? -1 : 1;
+    }
+
+    let res = 0;
+    if (STATE.sortBy === 'name') {
+      res = a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' });
+    } else if (STATE.sortBy === 'date') {
+      res = (a.modified || 0) - (b.modified || 0);
+    } else if (STATE.sortBy === 'size') {
+      res = (a.size || 0) - (b.size || 0);
+    } else if (STATE.sortBy === 'type') {
+      const extA = (a.extension || '').toLowerCase();
+      const extB = (b.extension || '').toLowerCase();
+      res = extA.localeCompare(extB) || a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' });
+    }
+
+    return STATE.sortOrder === 'desc' ? -res : res;
   });
 
   STATE.filteredItems = list;
@@ -425,6 +480,12 @@ function createGridCard(item) {
              class="w-4 h-4 rounded text-brand-500 bg-surface-input border-slate-700 focus:ring-0 cursor-pointer">
     </div>
 
+    <!-- Pinned Star Badge -->
+    ${STATE.favoritePaths.has(normalizePath(item.path)) ? `
+    <div class="absolute top-2 right-8 text-amber-400 z-10 p-1 drop-shadow" title="Pinned Favorite">
+      <i data-lucide="star" class="w-3.5 h-3.5 fill-amber-400"></i>
+    </div>` : ''}
+
     <!-- 3-Dots Context Menu Button -->
     <button onclick="event.stopPropagation(); openContextMenu(${escapeJsonAttr(item)})"
             class="action-btn absolute top-2 right-2 p-1.5 rounded-xl text-slate-400 hover:text-white hover:bg-slate-800 transition">
@@ -487,8 +548,9 @@ function createListRow(item) {
 
       <!-- Name & Meta -->
       <div class="min-w-0">
-        <div class="text-xs sm:text-sm font-bold text-slate-200 truncate group-hover:text-brand-400 transition">
-          ${escapeHtml(item.name)}
+        <div class="text-xs sm:text-sm font-bold text-slate-200 truncate group-hover:text-brand-400 transition flex items-center gap-1.5">
+          <span>${escapeHtml(item.name)}</span>
+          ${STATE.favoritePaths.has(normalizePath(item.path)) ? `<i data-lucide="star" class="w-3.5 h-3.5 text-amber-400 fill-amber-400 shrink-0" title="Pinned Favorite"></i>` : ''}
         </div>
         <div class="text-[10px] text-slate-400 sm:hidden flex items-center gap-2 font-mono mt-0.5">
           <span>${sizeText}</span>
@@ -514,6 +576,10 @@ function createListRow(item) {
 
 function getItemIconMarkup(item, sizeClasses = 'w-8 h-8') {
   if (item.is_dir) {
+    if (item.has_custom_icon) {
+      const iconUrl = `/api/fs/folder-icon?path=${encodeURIComponent(item.path)}&token=${STATE.authToken}`;
+      return `<img src="${iconUrl}" loading="lazy" class="${sizeClasses} object-contain rounded-lg drop-shadow" onerror="this.onerror=null; this.parentElement.innerHTML='<i data-lucide=\\'folder\\' class=\\'${sizeClasses} text-amber-400 fill-amber-400/20\\'></i>'; if(window.lucide)lucide.createIcons();">`;
+    }
     return `<i data-lucide="folder" class="${sizeClasses} text-amber-400 fill-amber-400/20"></i>`;
   }
 
@@ -646,6 +712,26 @@ async function batchDownloadZip() {
 // Clipboard Operations (Copy / Cut / Paste)
 // ============================================================
 
+function getPathName(p) {
+  if (!p) return '';
+  const clean = String(p).replace(/[\\/]+$/, '');
+  const parts = clean.split(/[\\/]/);
+  return parts.pop() || clean;
+}
+
+function getClipboardItems() {
+  if (!STATE.clipboard || !Array.isArray(STATE.clipboard.sources)) return [];
+  return STATE.clipboard.sources.map(src => {
+    if (typeof src === 'string') {
+      return { path: src, name: getPathName(src) };
+    }
+    return {
+      path: src.path,
+      name: src.name || getPathName(src.path)
+    };
+  });
+}
+
 function setClipboard(sources, isCut) {
   STATE.clipboard = { sources, isCut };
   localStorage.setItem('wfm_clipboard', JSON.stringify(STATE.clipboard));
@@ -654,37 +740,236 @@ function setClipboard(sources, isCut) {
 }
 
 function updateClipboardUI() {
-  const hasItems = STATE.clipboard && STATE.clipboard.sources && STATE.clipboard.sources.length > 0;
-  const count = hasItems ? STATE.clipboard.sources.length : 0;
+  const items = getClipboardItems();
+  const count = items.length;
+  const hasItems = count > 0;
 
   const mobBtn = document.getElementById('mobilePasteBtn');
   const deskBtn = document.getElementById('desktopPasteBtn');
   const mobBadge = document.getElementById('mobileClipboardBadge');
   const deskCount = document.getElementById('desktopClipboardCount');
 
-  if (hasItems) {
-    mobBtn.classList.remove('hidden');
-    deskBtn.classList.remove('hidden');
-    if (mobBadge) mobBadge.textContent = count;
-    if (deskCount) deskCount.textContent = count;
+  if (mobBtn) mobBtn.classList.toggle('hidden', !hasItems);
+  if (deskBtn) deskBtn.classList.toggle('hidden', !hasItems);
+  if (mobBadge) mobBadge.textContent = count;
+  if (deskCount) deskCount.textContent = count;
+
+  setupClipboardButtonInteractions();
+}
+
+function setupClipboardButtonInteractions() {
+  const mobBtn = document.getElementById('mobilePasteBtn');
+  const deskBtn = document.getElementById('desktopPasteBtn');
+
+  [mobBtn, deskBtn].forEach(btn => {
+    if (!btn || btn._hasInteractions) return;
+    btn._hasInteractions = true;
+
+    let pressTimer = null;
+    let didLongPress = false;
+
+    // Mobile Touch
+    btn.addEventListener('touchstart', (e) => {
+      didLongPress = false;
+      pressTimer = setTimeout(() => {
+        didLongPress = true;
+        if (navigator.vibrate) navigator.vibrate(40);
+        openClipboardInspectorModal();
+      }, 400);
+    }, { passive: true });
+
+    btn.addEventListener('touchend', (e) => {
+      clearTimeout(pressTimer);
+      if (didLongPress) {
+        e.preventDefault();
+        e.stopPropagation();
+      }
+    });
+
+    btn.addEventListener('touchmove', () => {
+      clearTimeout(pressTimer);
+    });
+
+    // Desktop Mouse
+    btn.addEventListener('mousedown', (e) => {
+      if (e.button !== 0) return;
+      didLongPress = false;
+      pressTimer = setTimeout(() => {
+        didLongPress = true;
+        openClipboardInspectorModal();
+      }, 450);
+    });
+
+    btn.addEventListener('mouseup', () => {
+      clearTimeout(pressTimer);
+    });
+
+    btn.addEventListener('mouseleave', () => {
+      clearTimeout(pressTimer);
+    });
+
+    btn.addEventListener('contextmenu', (e) => {
+      e.preventDefault();
+      openClipboardInspectorModal();
+    });
+
+    btn.onclick = (e) => {
+      if (didLongPress) {
+        didLongPress = false;
+        e.preventDefault();
+        e.stopPropagation();
+        return;
+      }
+      openPasteConfirmModal();
+    };
+  });
+}
+
+function openPasteConfirmModal() {
+  const items = getClipboardItems();
+  if (items.length === 0) {
+    showToast('Clipboard is empty', 'info');
+    return;
+  }
+
+  const isCut = STATE.clipboard && STATE.clipboard.isCut;
+  const modal = document.getElementById('pasteConfirmModal');
+  const title = document.getElementById('pasteConfirmTitle');
+  const target = document.getElementById('pasteConfirmTarget');
+  const summary = document.getElementById('pasteConfirmSummary');
+  const list = document.getElementById('pasteConfirmItemList');
+  const btn = document.getElementById('pasteConfirmBtn');
+
+  if (title) title.textContent = isCut ? 'Confirm Move (Cut)' : 'Confirm Paste (Copy)';
+  if (btn) btn.textContent = isCut ? 'Move Here' : 'Paste Here';
+
+  const destName = STATE.currentPath ? getPathName(STATE.currentPath) : 'Root Drive';
+  if (target) target.textContent = `Into folder: "${destName}"`;
+  if (summary) summary.textContent = `${items.length} item(s) to ${isCut ? 'move' : 'paste'}:`;
+
+  if (list) {
+    list.innerHTML = items.map(item => `
+      <div class="flex items-center gap-2 py-1 px-2.5 rounded-xl bg-surface-card/60 border border-slate-800 text-xs">
+        <i data-lucide="file" class="w-3.5 h-3.5 text-cyan-400 shrink-0"></i>
+        <span class="font-semibold text-slate-200 truncate flex-1" title="${escapeHtml(item.path)}">${escapeHtml(item.name)}</span>
+      </div>
+    `).join('');
+  }
+
+  modal.classList.remove('hidden');
+  toggleModalScrollLock(true);
+  if (window.lucide) lucide.createIcons();
+}
+
+function closePasteConfirmModal() {
+  const modal = document.getElementById('pasteConfirmModal');
+  if (modal) modal.classList.add('hidden');
+  toggleModalScrollLock(false);
+}
+
+function openClipboardInspectorModal() {
+  const items = getClipboardItems();
+  if (items.length === 0) {
+    showToast('Clipboard is empty', 'info');
+    return;
+  }
+
+  const isCut = STATE.clipboard && STATE.clipboard.isCut;
+  const modal = document.getElementById('clipboardInspectorModal');
+  const badge = document.getElementById('clipboardModeBadge');
+  const countText = document.getElementById('clipboardItemCount');
+
+  if (badge) {
+    badge.textContent = isCut ? 'Cut (Move)' : 'Copy (Duplicate)';
+    badge.className = isCut 
+      ? 'text-[10px] font-mono px-2 py-0.5 rounded-full bg-amber-500/15 text-amber-400 border border-amber-500/30 font-semibold'
+      : 'text-[10px] font-mono px-2 py-0.5 rounded-full bg-emerald-500/15 text-emerald-400 border border-emerald-500/30 font-semibold';
+  }
+  if (countText) countText.textContent = `${items.length} item(s) on clipboard`;
+
+  renderClipboardInspectorItems();
+
+  modal.classList.remove('hidden');
+  toggleModalScrollLock(true);
+  if (window.lucide) lucide.createIcons();
+}
+
+function renderClipboardInspectorItems() {
+  const items = getClipboardItems();
+  const list = document.getElementById('clipboardItemsList');
+  const countText = document.getElementById('clipboardItemCount');
+
+  if (!list) return;
+  if (countText) countText.textContent = `${items.length} item(s) on clipboard`;
+
+  if (items.length === 0) {
+    clearClipboardAction();
+    return;
+  }
+
+  list.innerHTML = items.map((item, idx) => `
+    <div class="flex items-center justify-between gap-2 p-2 hover:bg-surface-card/40 transition rounded-xl">
+      <div class="min-w-0 flex items-center gap-2.5">
+        <div class="w-7 h-7 rounded-lg bg-surface-card flex items-center justify-center shrink-0 border border-slate-800">
+          <i data-lucide="file" class="w-3.5 h-3.5 text-cyan-400"></i>
+        </div>
+        <div class="min-w-0">
+          <p class="text-xs font-bold text-slate-200 truncate" title="${escapeHtml(item.path)}">${escapeHtml(item.name)}</p>
+          <p class="text-[10px] text-slate-400 font-mono truncate max-w-[220px] sm:max-w-[280px]">${escapeHtml(item.path)}</p>
+        </div>
+      </div>
+      <button onclick="removeItemFromClipboard(${idx})" title="Remove item from clipboard" class="p-1.5 rounded-lg text-slate-400 hover:text-red-400 hover:bg-slate-800 transition">
+        <i data-lucide="x" class="w-3.5 h-3.5"></i>
+      </button>
+    </div>
+  `).join('');
+
+  if (window.lucide) lucide.createIcons();
+}
+
+function closeClipboardInspectorModal() {
+  const modal = document.getElementById('clipboardInspectorModal');
+  if (modal) modal.classList.add('hidden');
+  toggleModalScrollLock(false);
+}
+
+function clearClipboardAction() {
+  STATE.clipboard = null;
+  localStorage.removeItem('wfm_clipboard');
+  updateClipboardUI();
+  closePasteConfirmModal();
+  closeClipboardInspectorModal();
+  showToast('Clipboard cleared', 'info');
+}
+
+function removeItemFromClipboard(index) {
+  if (!STATE.clipboard || !Array.isArray(STATE.clipboard.sources)) return;
+  STATE.clipboard.sources.splice(index, 1);
+  if (STATE.clipboard.sources.length === 0) {
+    clearClipboardAction();
   } else {
-    mobBtn.classList.add('hidden');
-    deskBtn.classList.add('hidden');
+    localStorage.setItem('wfm_clipboard', JSON.stringify(STATE.clipboard));
+    updateClipboardUI();
+    renderClipboardInspectorItems();
   }
 }
 
-async function pasteClipboard() {
+async function executeConfirmedPaste() {
+  closePasteConfirmModal();
+  closeClipboardInspectorModal();
+
   if (!STATE.clipboard || !STATE.clipboard.sources || STATE.clipboard.sources.length === 0) return;
 
   const { sources, isCut } = STATE.clipboard;
-  showToast(`Pasting ${sources.length} item(s)...`, 'info');
+  const paths = sources.map(s => typeof s === 'string' ? s : s.path);
+  showToast(`Pasting ${paths.length} item(s)...`, 'info');
 
   try {
     const res = await apiFetch('/api/fs/clipboard/paste', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        sources,
+        sources: paths,
         dest_dir: STATE.currentPath,
         is_cut: isCut
       })
@@ -707,6 +992,10 @@ async function pasteClipboard() {
   }
 }
 
+async function pasteClipboard() {
+  openPasteConfirmModal();
+}
+
 // ============================================================
 // Item Context Menu / Bottom Sheet
 // ============================================================
@@ -714,6 +1003,19 @@ async function pasteClipboard() {
 function openContextMenu(item) {
   STATE.contextItem = item;
   document.getElementById('contextItemName').textContent = item.name;
+
+  const isPinned = STATE.favoritePaths.has(normalizePath(item.path));
+  const pinText = document.getElementById('ctxPinText');
+  const pinIcon = document.getElementById('ctxPinIcon');
+  if (pinText && pinIcon) {
+    if (isPinned) {
+      pinText.textContent = 'Remove from Favorites';
+      pinIcon.classList.add('fill-amber-400');
+    } else {
+      pinText.textContent = 'Pin to Favorites';
+      pinIcon.classList.remove('fill-amber-400');
+    }
+  }
   document.getElementById('contextItemMeta').textContent = `${
     item.is_dir ? 'Folder' : formatBytes(item.size)
   } • Modified ${formatDate(item.modified)}`;
@@ -724,6 +1026,11 @@ function openContextMenu(item) {
 
   const previewBtn = document.getElementById('ctxPreviewBtn');
   previewBtn.classList.toggle('hidden', item.is_dir);
+
+  const folderIconBtn = document.getElementById('ctxFolderIconBtn');
+  const folderIconResetBtn = document.getElementById('ctxFolderIconResetBtn');
+  if (folderIconBtn) folderIconBtn.classList.toggle('hidden', !item.is_dir);
+  if (folderIconResetBtn) folderIconResetBtn.classList.toggle('hidden', !item.is_dir || !item.has_custom_icon);
 
   document.getElementById('ctxDownloadText').textContent = item.is_dir ? 'Download as ZIP' : 'Download';
 
@@ -752,6 +1059,16 @@ async function handleContextAction(action) {
     case 'edit':
       openEditorModal(item.path);
       break;
+    case 'toggle_pin':
+      togglePin(item);
+      break;
+    case 'set_folder_icon':
+      STATE.folderIconTargetItem = item;
+      document.getElementById('folderIconFileInput').click();
+      break;
+    case 'reset_folder_icon':
+      resetFolderIcon(item.path);
+      break;
     case 'download':
       if (item.is_dir) {
         STATE.selectedPaths.clear();
@@ -764,6 +1081,11 @@ async function handleContextAction(action) {
       break;
     case 'copy':
       setClipboard([item.path], false);
+      copyTextToClipboard(item.path);
+      break;
+    case 'copy_path':
+      copyTextToClipboard(item.path);
+      showToast('Path copied to clipboard', 'success');
       break;
     case 'cut':
       setClipboard([item.path], true);
@@ -777,11 +1099,63 @@ async function handleContextAction(action) {
   }
 }
 
+async function uploadFolderIcon(file) {
+  const item = STATE.folderIconTargetItem;
+  if (!file || !item) return;
+  const targetPath = item.path;
+  const formData = new FormData();
+  formData.append('path', targetPath);
+  formData.append('file', file);
+
+  showToast(`Updating Windows folder logo for "${item.name}"...`, 'info');
+  try {
+    const res = await apiFetch('/api/fs/folder-icon/set', {
+      method: 'POST',
+      body: formData
+    });
+    if (res.ok) {
+      showToast('Folder logo updated successfully!', 'success');
+      await loadDirectory(STATE.currentPath);
+      await fetchFavorites();
+    } else {
+      const err = await res.json();
+      showToast('Failed to set folder logo: ' + (err.detail || 'Unknown error'), 'error');
+    }
+  } catch (e) {
+    showToast('Failed to upload logo: ' + e.message, 'error');
+  } finally {
+    const inp = document.getElementById('folderIconFileInput');
+    if (inp) inp.value = '';
+    STATE.folderIconTargetItem = null;
+  }
+}
+
+async function resetFolderIcon(path) {
+  if (!path) return;
+  const formData = new FormData();
+  formData.append('path', path);
+  try {
+    const res = await apiFetch('/api/fs/folder-icon/reset', {
+      method: 'POST',
+      body: formData
+    });
+    if (res.ok) {
+      showToast('Reset to default folder icon', 'info');
+      await loadDirectory(STATE.currentPath);
+      await fetchFavorites();
+    }
+  } catch (e) {
+    showToast('Error resetting icon: ' + e.message, 'error');
+  }
+}
+
 // ============================================================
 // File Previewer Modal with Pinch-to-Zoom
 // ============================================================
 
 function openPreviewModal(item) {
+  STATE.previewItem = item;
+  updatePreviewPinButton();
   const modal = document.getElementById('previewModal');
   const title = document.getElementById('previewTitle');
   const body = document.getElementById('previewBody');
@@ -1138,6 +1512,8 @@ function openDeleteModal(paths, label) {
   document.getElementById('deleteConfirmBtn').onclick = async () => {
     const permanent = document.getElementById('deleteModePermanent').checked;
     closeDeleteModal();
+      closePasteConfirmModal();
+      closeClipboardInspectorModal();
     showToast(`Deleting ${paths.length} item(s)...`, 'info');
 
     try {
@@ -1248,27 +1624,22 @@ function uploadFilesList(files) {
 async function openQrModal() {
   const modal = document.getElementById('qrModal');
   const urlDisplay = document.getElementById('qrUrlText');
-  const qrcodeCanvas = document.getElementById('qrcodeCanvas');
+  const qrImg = document.getElementById('brandedQrImg');
 
   try {
     const res = await apiFetch('/api/network/qr');
     const data = await res.json();
     urlDisplay.textContent = data.mobile_url;
 
-    qrcodeCanvas.innerHTML = '';
-    new QRCode(qrcodeCanvas, {
-      text: data.mobile_url,
-      width: 180,
-      height: 180,
-      colorDark: '#090d16',
-      colorLight: '#ffffff',
-      correctLevel: QRCode.CorrectLevel.H
-    });
+    if (qrImg && data.branded_qr_url) {
+      qrImg.src = data.branded_qr_url;
+    }
 
     modal.classList.remove('hidden');
     toggleModalScrollLock(true);
+    if (window.lucide) lucide.createIcons();
   } catch (err) {
-    showToast('Failed to generate QR code', 'error');
+    showToast('Failed to load QR code', 'error');
   }
 }
 
@@ -1401,4 +1772,374 @@ function showToast(message, type = 'info') {
     toast.classList.add('opacity-0', 'translate-y-2');
     setTimeout(() => toast.remove(), 300);
   }, 3500);
+}
+
+
+// ============================================================
+// File Sorting Controls
+// ============================================================
+
+function toggleSortMenu(e) {
+  if (e) e.stopPropagation();
+  const menu = document.getElementById('sortMenu');
+  if (!menu) return;
+  const isHidden = menu.classList.contains('hidden');
+  if (isHidden) {
+    updateSortMenuUI();
+    menu.classList.remove('hidden');
+  } else {
+    menu.classList.add('hidden');
+  }
+}
+
+function setSort(criterion) {
+  if (STATE.sortBy === criterion) {
+    STATE.sortOrder = STATE.sortOrder === 'asc' ? 'desc' : 'asc';
+  } else {
+    STATE.sortBy = criterion;
+    STATE.sortOrder = (criterion === 'date' || criterion === 'size') ? 'desc' : 'asc';
+  }
+  localStorage.setItem('wfm_sortBy', STATE.sortBy);
+  localStorage.setItem('wfm_sortOrder', STATE.sortOrder);
+  updateSortMenuUI();
+  applyFilters();
+  const menu = document.getElementById('sortMenu');
+  if (menu) menu.classList.add('hidden');
+}
+
+function toggleSortOrder(order) {
+  STATE.sortOrder = order;
+  localStorage.setItem('wfm_sortOrder', STATE.sortOrder);
+  updateSortMenuUI();
+  applyFilters();
+  const menu = document.getElementById('sortMenu');
+  if (menu) menu.classList.add('hidden');
+}
+
+function updateSortMenuUI() {
+  document.querySelectorAll('.sort-opt').forEach(btn => {
+    const sort = btn.dataset.sort;
+    const isCurrent = STATE.sortBy === sort;
+    const indicator = btn.querySelector('.sort-indicator');
+    if (isCurrent) {
+      btn.classList.add('text-brand-400', 'font-bold');
+      btn.classList.remove('text-slate-300');
+      if (indicator) {
+        indicator.innerHTML = `<i data-lucide="${STATE.sortOrder === 'asc' ? 'arrow-up' : 'arrow-down'}" class="w-3.5 h-3.5"></i>`;
+      }
+    } else {
+      btn.classList.remove('text-brand-400', 'font-bold');
+      btn.classList.add('text-slate-300');
+      if (indicator) indicator.innerHTML = '';
+    }
+  });
+
+  document.querySelectorAll('.order-opt').forEach(btn => {
+    const order = btn.dataset.order;
+    const isCurrent = STATE.sortOrder === order;
+    const indicator = btn.querySelector('.order-indicator');
+    if (isCurrent) {
+      btn.classList.add('text-brand-400', 'font-bold');
+      btn.classList.remove('text-slate-300');
+      if (indicator) indicator.innerHTML = '<i data-lucide="check" class="w-3.5 h-3.5"></i>';
+    } else {
+      btn.classList.remove('text-brand-400', 'font-bold');
+      btn.classList.add('text-slate-300');
+      if (indicator) indicator.innerHTML = '';
+    }
+  });
+
+  const sortBtn = document.getElementById('sortBtn');
+  if (sortBtn) {
+    sortBtn.title = `Sorted by ${STATE.sortBy} (${STATE.sortOrder.toUpperCase()})`;
+  }
+
+  if (window.lucide) lucide.createIcons();
+}
+
+// Global click handler to dismiss dropdowns
+document.addEventListener('click', (e) => {
+  const sortMenu = document.getElementById('sortMenu');
+  if (sortMenu && !sortMenu.classList.contains('hidden')) {
+    if (!e.target.closest('#sortMenu') && !e.target.closest('#sortBtn')) {
+      sortMenu.classList.add('hidden');
+    }
+  }
+});
+
+
+// ============================================================
+// Pinned & Favorites Management
+// ============================================================
+
+function normalizePath(p) {
+  if (!p) return '';
+  return String(p).replace(/\\/g, '/').toLowerCase();
+}
+
+async function fetchFavorites() {
+  try {
+    const res = await apiFetch('/api/favorites');
+    if (res.ok) {
+      const data = await res.json();
+      STATE.favorites = Array.isArray(data.favorites) ? data.favorites : [];
+    } else {
+      throw new Error('Favorites API response not OK');
+    }
+  } catch (err) {
+    STATE.favorites = JSON.parse(localStorage.getItem('wfm_favorites') || '[]');
+  }
+  syncFavoritePaths();
+  renderFavoritesShelf();
+  updateFilterCounts();
+}
+
+function syncFavoritePaths() {
+  STATE.favoritePaths = new Set(STATE.favorites.map(f => normalizePath(f.path)));
+  try {
+    localStorage.setItem('wfm_favorites', JSON.stringify(STATE.favorites));
+  } catch (e) {}
+}
+
+async function togglePin(item) {
+  if (!item || !item.path) return;
+  const norm = normalizePath(item.path);
+  const isPinned = STATE.favoritePaths.has(norm);
+
+  if (isPinned) {
+    STATE.favorites = STATE.favorites.filter(f => normalizePath(f.path) !== norm);
+    showToast(`Unpinned "${item.name}" from favorites`, 'info');
+  } else {
+    STATE.favorites.push({
+      path: item.path,
+      name: item.name || item.path.split(/[\\/]/).pop() || item.path,
+      is_dir: !!item.is_dir,
+      has_custom_icon: !!item.has_custom_icon,
+      pinned_at: Math.floor(Date.now() / 1000)
+    });
+    showToast(`⭐ Pinned "${item.name}" to favorites`, 'success');
+  }
+
+  syncFavoritePaths();
+  renderFavoritesShelf();
+  updateFilterCounts();
+  applyFilters();
+
+  try {
+    const res = await apiFetch('/api/favorites/toggle', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        path: item.path,
+        name: item.name,
+        is_dir: item.is_dir
+      })
+    });
+    if (res.ok) {
+      const data = await res.json();
+      if (Array.isArray(data.favorites)) {
+        STATE.favorites = data.favorites;
+        syncFavoritePaths();
+        renderFavoritesShelf();
+        updateFilterCounts();
+        applyFilters();
+      }
+    }
+  } catch (e) {
+    console.error('Server sync error for favorites:', e);
+  }
+}
+
+function renderFavoritesShelf() {
+  const shelf = document.getElementById('favoritesShelf');
+  const list = document.getElementById('favoritesList');
+  const badge = document.getElementById('favoritesCountBadge');
+  if (!shelf || !list) return;
+
+  if (STATE.favorites.length === 0) {
+    shelf.classList.add('hidden');
+    return;
+  }
+
+  shelf.classList.remove('hidden');
+  if (badge) badge.textContent = STATE.favorites.length;
+
+  list.innerHTML = '';
+  STATE.favorites.forEach(fav => {
+    const chip = document.createElement('div');
+    chip.className = 'group flex items-center gap-2 px-3 py-1.5 rounded-xl bg-surface-card hover:bg-surface-hover border border-slate-700/80 hover:border-amber-500/50 shadow-sm transition shrink-0 cursor-pointer select-none touch-press';
+
+    const isDir = fav.is_dir;
+    let iconMarkup;
+    if (isDir) {
+      const iconUrl = `/api/fs/folder-icon?path=${encodeURIComponent(fav.path)}&token=${STATE.authToken}`;
+      const showImg = fav.has_custom_icon;
+      iconMarkup = `
+        <span class="inline-flex items-center justify-center w-4 h-4 shrink-0 relative">
+          <img src="${iconUrl}" 
+               class="w-4 h-4 object-contain rounded-sm shrink-0" 
+               style="${showImg ? '' : 'display:none;'}"
+               onload="this.style.display='inline-block'; const f=this.nextElementSibling; if(f) f.style.display='none';" 
+               onerror="this.style.display='none'; const f=this.nextElementSibling; if(f) f.style.display='inline-block';">
+          <i data-lucide="folder" class="w-3.5 h-3.5 text-amber-400 fill-amber-400/20 shrink-0" style="${showImg ? 'display:none;' : ''}"></i>
+        </span>
+      `;
+    } else {
+      iconMarkup = '<i data-lucide="file" class="w-3.5 h-3.5 text-cyan-400 shrink-0"></i>';
+    }
+
+    chip.innerHTML = `
+      ${iconMarkup}
+      <span class="text-xs font-semibold text-slate-200 truncate max-w-[120px] sm:max-w-[180px]">${escapeHtml(fav.name)}</span>
+      <button onclick="event.stopPropagation(); togglePin(${escapeJsonAttr(fav)})" title="Remove from favorites" class="text-slate-500 hover:text-amber-400 p-0.5 rounded-md hover:bg-slate-700/60 ml-0.5 transition">
+        <i data-lucide="x" class="w-3 h-3"></i>
+      </button>
+    `;
+
+    chip.onclick = (e) => {
+      if (e.target.closest('button')) return;
+      if (fav.is_dir) {
+        loadDirectory(fav.path);
+      } else {
+        openPreviewModal(fav);
+      }
+    };
+
+    list.appendChild(chip);
+  });
+
+  if (window.lucide) lucide.createIcons();
+}
+
+function updatePreviewPinButton() {
+  const pinBtn = document.getElementById('previewPinBtn');
+  const pinIcon = document.getElementById('previewPinIcon');
+  if (!pinBtn || !pinIcon || !STATE.previewItem) return;
+
+  const isPinned = STATE.favoritePaths.has(normalizePath(STATE.previewItem.path));
+  if (isPinned) {
+    pinIcon.classList.add('text-amber-400', 'fill-amber-400');
+    pinIcon.classList.remove('text-slate-400');
+    pinBtn.title = 'Remove from Favorites';
+  } else {
+    pinIcon.classList.remove('text-amber-400', 'fill-amber-400');
+    pinIcon.classList.add('text-slate-400');
+    pinBtn.title = 'Pin to Favorites';
+  }
+}
+
+function togglePinCurrentPreview() {
+  if (STATE.previewItem) {
+    togglePin(STATE.previewItem);
+    updatePreviewPinButton();
+  }
+}
+
+async function batchTogglePin() {
+  const selectedPaths = Array.from(STATE.selectedPaths);
+  if (selectedPaths.length === 0) return;
+
+  const allPinned = selectedPaths.every(p => STATE.favoritePaths.has(normalizePath(p)));
+  const itemsToSync = [];
+
+  for (const p of selectedPaths) {
+    const norm = normalizePath(p);
+    const item = STATE.items.find(i => normalizePath(i.path) === norm);
+    const name = item ? item.name : (p.split(/[\\/]/).pop() || p);
+    const isDir = item ? item.is_dir : false;
+
+    if (allPinned) {
+      STATE.favorites = STATE.favorites.filter(f => normalizePath(f.path) !== norm);
+    } else {
+      if (!STATE.favoritePaths.has(norm)) {
+        STATE.favorites.push({
+          path: p,
+          name,
+          is_dir: isDir,
+          has_custom_icon: !!item?.has_custom_icon,
+          pinned_at: Math.floor(Date.now() / 1000)
+        });
+      }
+    }
+    itemsToSync.push({ path: p, name, is_dir: isDir });
+  }
+
+  syncFavoritePaths();
+  renderFavoritesShelf();
+  updateFilterCounts();
+  applyFilters();
+  deselectAll();
+
+  showToast(allPinned ? `Unpinned ${selectedPaths.length} items` : `⭐ Pinned ${selectedPaths.length} items to favorites`, 'success');
+
+  try {
+    const bRes = await apiFetch('/api/favorites/batch', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ items: itemsToSync, action: allPinned ? 'unpin' : 'pin' })
+    });
+    if (bRes.ok) {
+      const bData = await bRes.json();
+      if (Array.isArray(bData.favorites)) {
+        STATE.favorites = bData.favorites;
+        syncFavoritePaths();
+        renderFavoritesShelf();
+        updateFilterCounts();
+        applyFilters();
+      }
+    }
+  } catch (e) {
+    console.error('Batch favorites sync error:', e);
+  }
+}
+
+async function clearAllFavoritesPrompt() {
+  if (STATE.favorites.length === 0) return;
+  if (!confirm(`Are you sure you want to unpin all ${STATE.favorites.length} favorite items?`)) return;
+
+  STATE.favorites = [];
+  syncFavoritePaths();
+  renderFavoritesShelf();
+  updateFilterCounts();
+  applyFilters();
+  showToast('Cleared all pinned favorites', 'info');
+
+  try {
+    await apiFetch('/api/favorites/clear', {
+      method: 'POST'
+    });
+  } catch (e) {
+    console.error('Failed to clear favorites on server:', e);
+  }
+}
+
+// Robust clipboard copy with HTTP/local Wi-Fi fallback
+function copyTextToClipboard(text) {
+  if (!text) return;
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(text).catch(() => {
+      fallbackCopyText(text);
+    });
+  } else {
+    fallbackCopyText(text);
+  }
+}
+
+function fallbackCopyText(text) {
+  try {
+    const textarea = document.createElement('textarea');
+    textarea.value = text;
+    textarea.style.position = 'fixed';
+    textarea.style.left = '-9999px';
+    textarea.style.top = '-9999px';
+    textarea.setAttribute('readonly', '');
+    document.body.appendChild(textarea);
+    textarea.select();
+    document.execCommand('copy');
+    document.body.removeChild(textarea);
+  } catch (err) {
+    console.warn('Fallback clipboard copy failed:', err);
+  }
 }

@@ -137,3 +137,196 @@ textarea:focus-visible {
   will-change: transform;
   transition: transform 0.05s ease-out;
 }
+
+/* ============================================================
+   CHAT HEADS MULTITASK TERMINAL SYSTEM
+   ============================================================ */
+:root {
+  --ch-acc: #06b6d4;
+  --ch-acc-glow: rgba(6, 182, 212, 0.45);
+  --ch-success: #10b981;
+  --ch-danger: #ef4444;
+}
+
+body.chathead-dragging .chathead, body.chathead-flying .chathead {
+  transition: opacity .2s, box-shadow .2s !important;
+}
+body.chathead-dragging .chathead {
+  cursor: grabbing !important;
+}
+
+.chathead {
+  position: fixed;
+  left: 0;
+  top: 0;
+  will-change: transform;
+  width: 58px;
+  height: 58px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  color: #fff;
+  font-weight: 700;
+  font-size: 14px;
+  letter-spacing: 0.5px;
+  cursor: pointer;
+  touch-action: none;
+  user-select: none;
+  background: #0f172a;
+  box-shadow: 0 6px 20px rgba(0,0,0,0.65), 0 0 0 2px rgba(255,255,255,0.18);
+  transition: transform .45s cubic-bezier(.22,1.15,.36,1), opacity .25s, box-shadow .2s;
+  z-index: 50;
+}
+
+.chathead.act {
+  box-shadow: 0 0 0 3px var(--ch-acc), 0 0 22px var(--ch-acc-glow), 0 8px 24px rgba(0,0,0,0.85);
+}
+
+.chathead.add {
+  background: #1e293b !important;
+  color: #94a3b8;
+  font-size: 26px;
+  font-weight: 300;
+  border: 1.5px dashed #475569;
+}
+
+.chathead.off, .chathead.hid {
+  opacity: 0;
+  pointer-events: none;
+}
+
+.chathead .pulse-dot {
+  position: absolute;
+  right: 0px;
+  bottom: 0px;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--ch-success);
+  border: 2px solid #0b0f19;
+  box-shadow: 0 0 8px var(--ch-success);
+}
+
+.chathead .pulse-dot.pulse {
+  animation: pulse-ring 1.8s infinite;
+}
+
+@keyframes pulse-ring {
+  0% { transform: scale(0.9); opacity: 0.95; }
+  50% { transform: scale(1.35); opacity: 0.4; }
+  100% { transform: scale(0.9); opacity: 0.95; }
+}
+
+.chathead .bd {
+  position: absolute;
+  top: -4px;
+  right: -4px;
+  min-width: 20px;
+  height: 20px;
+  border-radius: 10px;
+  background: var(--ch-acc);
+  color: #042f2e;
+  font-size: 11px;
+  font-weight: 800;
+  display: none;
+  place-items: center;
+  padding: 0 5px;
+  border: 2px solid #090d16;
+}
+
+/* Dismiss Trash Zone */
+#chathead-del {
+  position: fixed;
+  left: 50%;
+  bottom: 28px;
+  width: 64px;
+  height: 64px;
+  margin-left: -32px;
+  border-radius: 50%;
+  background: rgba(15, 23, 42, 0.92);
+  color: #fff;
+  display: grid;
+  place-items: center;
+  font-size: 24px;
+  opacity: 0;
+  transform: translateY(40px) scale(.8);
+  transition: .22s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+  z-index: 95;
+  pointer-events: none;
+  border: 2px solid rgba(239, 68, 68, 0.4);
+  box-shadow: 0 10px 25px rgba(0,0,0,0.6);
+}
+#chathead-del.on {
+  opacity: 1;
+  transform: none;
+}
+#chathead-del.hot {
+  background: var(--ch-danger);
+  border-color: #fca5a5;
+  transform: scale(1.28);
+  box-shadow: 0 0 30px rgba(239, 68, 68, 0.75);
+}
+
+/* Backdrop Veil */
+#chathead-veil {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.65);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity .25s ease;
+  z-index: 45;
+}
+#chathead-veil.on {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+/* Restore Button */
+#chathead-restore {
+  position: fixed;
+  right: 16px;
+  bottom: 20px;
+  border: 0;
+  border-radius: 24px;
+  padding: 10px 18px;
+  background: var(--ch-acc);
+  color: #042f2e;
+  font: 700 13px system-ui, sans-serif;
+  box-shadow: 0 4px 18px rgba(6, 182, 212, 0.4);
+  cursor: pointer;
+  display: none;
+  z-index: 48;
+}
+
+/* Drawer Terminal Panel */
+#chathead-panel {
+  position: fixed;
+  left: 50%;
+  top: 132px;
+  bottom: 16px;
+  width: min(560px, calc(100% - 20px));
+  transform: translate(-50%, 28px) scale(.96);
+  opacity: 0;
+  pointer-events: none;
+  transition: transform .25s cubic-bezier(.16,1,.3,1), opacity .2s;
+  background: #0f172a;
+  border: 1px solid #1e293b;
+  border-radius: 24px;
+  z-index: 49;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  box-shadow: 0 16px 45px rgba(0,0,0,0.88), 0 0 0 1px rgba(255,255,255,0.06);
+}
+#chathead-panel.on {
+  transform: translate(-50%, 0);
+  opacity: 1;
+  pointer-events: auto;
+}
+#chathead-panel.on.away {
+  transform: translate(-50%, 36px) scale(.94);
+  opacity: 0;
+  pointer-events: none;
+}
+

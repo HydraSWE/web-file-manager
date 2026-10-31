@@ -113,6 +113,134 @@ def is_hidden_file(entry: os.DirEntry) -> bool:
     return False
 
 
+def get_folder_custom_icon(folder_path: str) -> Optional[str]:
+    """
+    Checks if a folder has a custom Windows icon configured via desktop.ini
+    or a dedicated cover/icon image file. Returns the resolved file path or None.
+    """
+    if not os.path.isdir(folder_path):
+        return None
+
+    # 1. Parse desktop.ini
+    ini_path = os.path.join(folder_path, "desktop.ini")
+    if os.path.isfile(ini_path):
+        try:
+            lines = []
+            for enc in ("utf-8", "utf-16", "cp1252", "latin-1"):
+                try:
+                    with open(ini_path, "r", encoding=enc, errors="ignore") as f:
+                        lines = f.readlines()
+                    break
+                except Exception:
+                    continue
+
+            for line in lines:
+                line = line.strip()
+                lower = line.lower()
+                if lower.startswith("iconresource=") or lower.startswith("iconfile="):
+                    val = line.split("=", 1)[1].strip()
+                    if "," in val:
+                        val = val.rsplit(",", 1)[0].strip()
+                    val = val.strip('"\'')
+                    if not os.path.isabs(val):
+                        resolved = os.path.normpath(os.path.join(folder_path, val))
+                    else:
+                        resolved = os.path.normpath(val)
+                    if os.path.isfile(resolved):
+                        return resolved
+        except Exception:
+            pass
+
+    # 2. Look for standard folder thumbnail / logo files
+    for cand in ("folder.ico", "folder.png", "folder.jpg", "logo.png", "logo.ico", "cover.jpg", "cover.png", "icon.ico"):
+        p = os.path.join(folder_path, cand)
+        if os.path.isfile(p):
+            return p
+
+    return None
+
+
+def set_folder_custom_icon(folder_path: str, image_bytes: bytes) -> str:
+    """
+    Configures a folder with a custom Windows Explorer icon using desktop.ini.
+    Converts uploaded image to Windows .ico format, writes desktop.ini,
+    applies Windows attributes (+r to folder, +h +s to desktop.ini), and
+    refreshes Windows Explorer icon cache via SHChangeNotify.
+    """
+    import io
+    from PIL import Image
+
+    if not os.path.isdir(folder_path):
+        raise FileNotFoundError(f"Folder not found: {folder_path}")
+
+    # Convert image to .ico format with standard Windows icon sizes
+    img = Image.open(io.BytesIO(image_bytes))
+    if img.mode != "RGBA":
+        img = img.convert("RGBA")
+
+    ico_path = os.path.join(folder_path, "folder_icon.ico")
+    icon_sizes = [(256, 256), (128, 128), (64, 64), (48, 48), (32, 32), (16, 16)]
+    img.save(ico_path, format="ICO", sizes=icon_sizes)
+
+    # Write desktop.ini
+    ini_path = os.path.join(folder_path, "desktop.ini")
+    ini_content = (
+        "[.ShellClassInfo]\r\n"
+        "IconResource=folder_icon.ico,0\r\n"
+        "[ViewState]\r\n"
+        "Mode=\r\n"
+        "Vid=\r\n"
+        "FolderType=Generic\r\n"
+    )
+
+    if os.path.exists(ini_path) and os.name == "nt":
+        os.system(f'attrib -h -s "{ini_path}" >nul 2>&1')
+
+    with open(ini_path, "w", encoding="utf-8") as f:
+        f.write(ini_content)
+
+    if os.name == "nt":
+        os.system(f'attrib +r "{folder_path}" >nul 2>&1')
+        os.system(f'attrib +h +s "{ini_path}" >nul 2>&1')
+        os.system(f'attrib +h "{ico_path}" >nul 2>&1')
+        try:
+            ctypes.windll.shell32.SHChangeNotify(0x08000000, 0x0000, None, None)
+        except Exception:
+            pass
+
+    return ico_path
+
+
+def reset_folder_custom_icon(folder_path: str) -> bool:
+    """
+    Resets a folder's icon back to standard Windows folder icon.
+    """
+    if not os.path.isdir(folder_path):
+        return False
+
+    ini_path = os.path.join(folder_path, "desktop.ini")
+    ico_path = os.path.join(folder_path, "folder_icon.ico")
+
+    if os.name == "nt":
+        if os.path.exists(ini_path):
+            os.system(f'attrib -h -s "{ini_path}" >nul 2>&1')
+            try:
+                os.remove(ini_path)
+            except Exception:
+                pass
+        if os.path.exists(ico_path):
+            os.system(f'attrib -h "{ico_path}" >nul 2>&1')
+            try:
+                os.remove(ico_path)
+            except Exception:
+                pass
+        try:
+            ctypes.windll.shell32.SHChangeNotify(0x08000000, 0x0000, None, None)
+        except Exception:
+            pass
+    return True
+
+
 def get_item_category(name: str, is_dir: bool) -> str:
     """
     Classifies file types into high-level categories for UI badges and icons.
@@ -183,6 +311,13 @@ def list_directory(dir_path: str, show_hidden: bool = False, root_restriction: s
                         except Exception:
                             child_count = 0
 
+                    has_custom_icon = False
+                    if is_dir:
+                        try:
+                            has_custom_icon = bool(get_folder_custom_icon(entry.path))
+                        except Exception:
+                            has_custom_icon = False
+
                     items.append({
                         "name": entry.name,
                         "path": entry.path,
@@ -192,7 +327,8 @@ def list_directory(dir_path: str, show_hidden: bool = False, root_restriction: s
                         "extension": ext,
                         "category": get_item_category(entry.name, is_dir),
                         "child_count": child_count,
-                        "is_hidden": is_hidden_file(entry)
+                        "is_hidden": is_hidden_file(entry),
+                        "has_custom_icon": has_custom_icon
                     })
                 except (PermissionError, FileNotFoundError, OSError):
                     continue
@@ -205,19 +341,21 @@ def list_directory(dir_path: str, show_hidden: bool = False, root_restriction: s
     drive, path_tail = os.path.splitdrive(target)
     if drive:
         drive_root = drive + "\\"
-        breadcrumbs.append({"name": drive, "path": drive_root})
+        breadcrumbs.append({"name": drive, "path": drive_root, "has_custom_icon": False, "is_drive": True})
         parts = [p for p in path_tail.split(os.sep) if p]
         curr = drive_root
         for part in parts:
             curr = os.path.join(curr, part)
-            breadcrumbs.append({"name": part, "path": curr})
+            has_icon = bool(get_folder_custom_icon(curr))
+            breadcrumbs.append({"name": part, "path": curr, "has_custom_icon": has_icon})
     else:
         parts = [p for p in target.split(os.sep) if p]
         curr = "/"
-        breadcrumbs.append({"name": "Root", "path": "/"})
+        breadcrumbs.append({"name": "Root", "path": "/", "has_custom_icon": False, "is_drive": True})
         for part in parts:
             curr = os.path.join(curr, part)
-            breadcrumbs.append({"name": part, "path": curr})
+            has_icon = bool(get_folder_custom_icon(curr))
+            breadcrumbs.append({"name": part, "path": curr, "has_custom_icon": has_icon})
 
     return {
         "current_path": target,
