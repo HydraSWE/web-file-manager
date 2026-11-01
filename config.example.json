@@ -1,0 +1,29 @@
+{
+  "app_name": "Web File Manager",
+  "app_icon": "/static/app_icon.png",
+  "port": 8088,
+  "host": "0.0.0.0",
+  "root_path": "",
+  "pin": "",
+  "allow_recycle_bin": true,
+  "allow_permanent_delete": true,
+  "show_hidden_files": false,
+  "execution": {
+    "enabled": true,
+    "require_authentication": true,
+    "require_confirmation": true,
+    "allowed_extensions": [
+      ".bat",
+      ".cmd",
+      ".ps1",
+      ".py",
+      ".exe"
+    ],
+    "default_script_mode": "terminal",
+    "timeout_seconds": 300,
+    "max_concurrent_processes": 3,
+    "allow_desktop_execution": true,
+    "allowed_roots": [],
+    "powershell_override_policy": false
+  }
+}

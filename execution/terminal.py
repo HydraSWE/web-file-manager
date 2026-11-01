@@ -27,7 +27,11 @@ MAX_BUFFER_LINES = 5000
 STREAM_CHUNK = 4096
 
 
-def _build_command(canonical_path: str, executor_type: str) -> list[str]:
+def _build_command(
+    canonical_path: str,
+    executor_type: str,
+    powershell_override: bool = False,
+) -> list[str]:
     """
     Build the subprocess argument list for a given executor type.
 
@@ -36,6 +40,7 @@ def _build_command(canonical_path: str, executor_type: str) -> list[str]:
     - Executable is always a known system binary or sys.executable
     - canonical_path is passed as a separate argument (no concatenation)
     - No user-supplied interpreter or arguments accepted
+    - Respects system PowerShell execution policy by default
     """
     working_dir = os.path.dirname(canonical_path)
 
@@ -44,14 +49,13 @@ def _build_command(canonical_path: str, executor_type: str) -> list[str]:
         return ["cmd.exe", "/D", "/C", canonical_path]
 
     elif executor_type == "powershell":
-        # -NonInteractive: no prompts; -ExecutionPolicy Bypass scoped to this invocation
-        # We set ExecutionPolicy to Bypass PER-PROCESS only — does not change machine policy
-        return [
-            "powershell.exe",
-            "-NonInteractive",
-            "-ExecutionPolicy", "Bypass",
-            "-File", canonical_path,
-        ]
+        # -NonInteractive: no prompts
+        # System ExecutionPolicy is respected by default unless powershell_override is explicitly enabled
+        cmd = ["powershell.exe", "-NonInteractive"]
+        if powershell_override:
+            cmd.extend(["-ExecutionPolicy", "Bypass"])
+        cmd.extend(["-File", canonical_path])
+        return cmd
 
     elif executor_type == "python":
         # Use the same interpreter running the server
@@ -174,6 +178,7 @@ async def run_terminal(
     executor_type: str,
     timeout_seconds: int,
     process_manager,
+    powershell_override: bool = False,
 ) -> None:
     """
     Launch the script in terminal mode.
@@ -183,7 +188,7 @@ async def run_terminal(
     This coroutine runs as an asyncio background task.
     """
     buf = create_buffer(process_id)
-    cmd = _build_command(canonical_path, executor_type)
+    cmd = _build_command(canonical_path, executor_type, powershell_override=powershell_override)
     working_dir = os.path.dirname(canonical_path)
 
     try:

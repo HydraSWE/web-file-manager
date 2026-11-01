@@ -25,6 +25,7 @@ from fastapi.responses import FileResponse, StreamingResponse, JSONResponse, HTM
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
+import urllib.parse
 import json as _json
 
 import file_ops
@@ -37,6 +38,23 @@ if hasattr(qr_utils, "_load_env_file"):
 
 from execution.manager import init_execution_manager
 from execution import terminal as terminal_mod
+
+# ==========================================
+# Security subsystem bootstrap
+# ==========================================
+from security.database import init_db as _init_security_db
+from security.session_manager import (
+    validate_session as _validate_device_session,
+    extract_session_from_request as _extract_device_session_token,
+    migrate_legacy_sessions,
+)
+from security.device_registry import (
+    is_owner as _is_device_owner,
+    is_trusted as _is_device_trusted,
+)
+from security.lockdown import is_locked_down as _is_locked_down
+from security.permissions import Permission as _Permission
+from security.router import security_router
 
 # Base directories
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -117,14 +135,111 @@ _execution_manager = init_execution_manager(config)
 
 app = FastAPI(title="Web File Manager", docs_url=None, redoc_url=None)
 
+# ==========================================
+# Security system init (must run before any request)
+# ==========================================
+_broker_proc = None
+
+def _start_broker_if_needed():
+    global _broker_proc
+    if os.name != "nt":
+        return
+    broker_script = os.path.join(BASE_DIR, "local_broker", "broker.py")
+    if not os.path.isfile(broker_script):
+        return
+
+    # Check if broker pipe is already accessible
+    try:
+        import ctypes
+        k32 = ctypes.windll.kernel32
+        GENERIC_READ = 0x80000000
+        GENERIC_WRITE = 0x40000000
+        OPEN_EXISTING = 3
+        h = k32.CreateFileW(r"\\.\pipe\HydraAuthBroker", GENERIC_READ | GENERIC_WRITE, 0, None, OPEN_EXISTING, 0, None)
+        if h != -1 and h != 0xFFFFFFFFFFFFFFFF:
+            k32.CloseHandle(h)
+            return  # Already running
+    except Exception:
+        pass
+
+    try:
+        import subprocess
+        _broker_proc = subprocess.Popen(
+            [sys.executable, broker_script],
+            cwd=BASE_DIR,
+        )
+        import logging as _logging
+        _logging.getLogger(__name__).info("Windows Auth Broker auto-started (PID %s)", _broker_proc.pid)
+        import time as _time
+        _time.sleep(0.5)
+    except Exception as e:
+        import logging as _logging
+        _logging.getLogger(__name__).warning("Could not auto-start Windows Auth Broker: %s", e)
+
+
+@app.on_event("startup")
+async def _startup_security():
+    """Initialise security DB, auto-start Windows broker, and migrate legacy sessions on startup."""
+    try:
+        _init_security_db()
+        # Auto-start local Windows Auth Broker on Windows if not already running
+        _start_broker_if_needed()
+        # Migrate legacy plaintext sessions + PIN (idempotent)
+        migrate_legacy_sessions(SESSION_TOKENS, config)
+    except Exception as _e:
+        import logging as _logging
+        _logging.getLogger(__name__).error("Security subsystem init failed: %s", _e)
+
+
+@app.on_event("shutdown")
+async def _shutdown_security():
+    """Cleanly terminate child broker process on server shutdown."""
+    global _broker_proc
+    if _broker_proc:
+        try:
+            _broker_proc.terminate()
+            _broker_proc.wait(timeout=2)
+        except Exception:
+            try:
+                _broker_proc.kill()
+            except Exception:
+                pass
+        _broker_proc = None
+
+# Mount security router (all /api/security/*, /api/pairing/*, /api/devices/*, etc.)
+app.include_router(security_router)
+
 # Enable CORS for local cross-origin if needed
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1|192\.168\.\d+\.\d+|10\.\d+\.\d+\.\d+|172\.(1[6-9]|2[0-9]|3[0-1])\.\d+\.\d+)(:\d+)?$",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+def is_allowed_ws_origin(origin: Optional[str], host: Optional[str]) -> bool:
+    """Validate WebSocket Origin header against allowed local/LAN hosts."""
+    if not origin:
+        return True
+    try:
+        parsed = urllib.parse.urlparse(origin)
+        hostname = (parsed.hostname or "").lower()
+        netloc = parsed.netloc.lower()
+        if host and netloc == host.lower():
+            return True
+        if hostname in ("localhost", "127.0.0.1"):
+            return True
+        if hostname.startswith("192.168.") or hostname.startswith("10."):
+            return True
+        if hostname.startswith("172."):
+            parts = hostname.split(".")
+            if len(parts) == 4 and parts[1].isdigit() and 16 <= int(parts[1]) <= 31:
+                return True
+        return False
+    except Exception:
+        return False
 
 
 def verify_auth(request: Request):
@@ -146,6 +261,12 @@ def verify_auth(request: Request):
         auth_header = request.headers.get("Authorization", "").strip()
         if auth_header.lower().startswith("bearer "):
             token = auth_header[7:].strip()
+
+    if token:
+        dev_session = _validate_device_session(token)
+        if dev_session:
+            request.state.device_session = dev_session
+            return True
 
     if token and token in SESSION_TOKENS:
         return True
@@ -393,26 +514,50 @@ async def paste_clipboard(payload: dict, authorized: bool = Depends(verify_auth)
 async def upload_files(
     dir_path: str = Form(...),
     files: List[UploadFile] = File(...),
+    relative_paths: Optional[str] = Form(None),
     authorized: bool = Depends(verify_auth)
 ):
     dest = file_ops.sanitize_path(dir_path, config.get("root_path", ""))
     if not os.path.isdir(dest):
         raise HTTPException(status_code=400, detail="Invalid destination directory")
 
+    rel_path_list = []
+    if relative_paths:
+        try:
+            rel_path_list = json.loads(relative_paths)
+        except Exception:
+            rel_path_list = []
+
     saved_files = []
-    for file in files:
-        filename = file.filename or "upload.bin"
-        filename = os.path.basename(filename)
-        save_path = os.path.join(dest, filename)
+    for idx, file in enumerate(files):
+        rel_path = None
+        if idx < len(rel_path_list) and rel_path_list[idx]:
+            rel_path = rel_path_list[idx]
+        elif file.filename and ('/' in file.filename or '\\' in file.filename):
+            rel_path = file.filename
+
+        if rel_path:
+            clean_rel = os.path.normpath(rel_path.replace('\\', '/')).lstrip('/\\')
+            parts = [p for p in clean_rel.split(os.sep) if p and p != '..']
+            if not parts:
+                parts = ["upload.bin"]
+            target_subfolder = os.path.join(dest, *parts[:-1]) if len(parts) > 1 else dest
+            os.makedirs(target_subfolder, exist_ok=True)
+            filename = parts[-1]
+            save_path = os.path.join(target_subfolder, filename)
+        else:
+            filename = file.filename or "upload.bin"
+            filename = os.path.basename(filename)
+            save_path = os.path.join(dest, filename)
 
         counter = 1
         name_root, name_ext = os.path.splitext(filename)
+        parent_dir = os.path.dirname(save_path)
         while os.path.exists(save_path):
-            save_path = os.path.join(dest, f"{name_root} ({counter}){name_ext}")
+            save_path = os.path.join(parent_dir, f"{name_root} ({counter}){name_ext}")
             counter += 1
 
         with open(save_path, "wb") as buffer:
-            shutil_copy = True
             while chunk := await file.read(1024 * 1024):  # 1MB chunk
                 buffer.write(chunk)
         saved_files.append(save_path)
@@ -435,12 +580,18 @@ async def download_zip(payload: dict, authorized: bool = Depends(verify_auth)):
         if len(paths) == 1:
             base = os.path.basename(paths[0].rstrip('\\/'))
             archive_name = f"{base}.zip"
+        else:
+            import datetime
+            timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            archive_name = f"hydra_bundle_{timestamp}.zip"
 
+        from starlette.background import BackgroundTask
+        task = BackgroundTask(os.remove, temp_zip.name)
         return FileResponse(
             path=temp_zip.name,
             filename=archive_name,
             media_type="application/zip",
-            background=None
+            background=task
         )
     except Exception as e:
         if os.path.exists(temp_zip.name):
@@ -660,8 +811,12 @@ def verify_exec_auth(request: Request) -> str:
     Dependency: validate that the request has a valid session token for execution.
     Returns the token string on success (used as process ownership key).
     Raises 401 if not authenticated.
-    Raises 403 if execution is disabled.
+    Raises 403 if execution is disabled or security lockdown is active.
     """
+    # Check security lockdown first
+    if _is_locked_down():
+        raise HTTPException(status_code=503, detail="Security lockdown is active — execution blocked")
+
     if not _execution_manager.enabled:
         raise HTTPException(status_code=403, detail="File execution is disabled")
 
@@ -669,6 +824,14 @@ def verify_exec_auth(request: Request) -> str:
         token = _get_exec_token(request)
         if not token:
             raise HTTPException(status_code=401, detail="Execution requires authentication")
+
+        dev_session = _validate_device_session(token)
+        if dev_session:
+            perms = dev_session.get("permissions", [])
+            if _Permission.EXECUTION_SCRIPT not in perms and _Permission.EXECUTION_DESKTOP not in perms:
+                raise HTTPException(status_code=403, detail="Device lacks execution permissions")
+            request.state.device_session = dev_session
+            return token
 
         # If a PIN is configured, the token must be in SESSION_TOKENS
         pin_required = bool(config.get("pin", "").strip())
@@ -806,30 +969,64 @@ async def execution_websocket(websocket: WebSocket, process_id: str):
 
     The connection is closed by the server when the process completes.
     """
-    # Auth check via query param (WebSocket cannot send custom headers)
-    token = websocket.query_params.get("token", "").strip()
+    # 1. Validate Origin header
+    origin = websocket.headers.get("origin")
+    host = websocket.headers.get("host")
+    if origin and not is_allowed_ws_origin(origin, host):
+        logger.warning("Rejected WebSocket connection from unauthorized origin: %s", origin)
+        await websocket.close(code=4003, reason="Forbidden: Cross-origin WebSocket access denied")
+        return
 
-    if _execution_manager.require_authentication and not token:
-        await websocket.close(code=4001, reason="Authentication required")
+    # 2. Verify execution enabled
+    if not _execution_manager.enabled:
+        await websocket.close(code=4003, reason="File execution is disabled")
+        return
+
+    # 3. Authenticate token
+    token = websocket.query_params.get("token", "").strip()
+    if not token:
+        token = websocket.cookies.get("wfm_token", "").strip()
+
+    if _is_locked_down():
+        await websocket.close(code=4003, reason="Security lockdown is active")
         return
 
     if _execution_manager.require_authentication:
-        pin_required = bool(config.get("pin", "").strip())
-        if token not in SESSION_TOKENS and (pin_required or token not in SESSION_TOKENS):
-            # Also accept tokens even without PIN (as long as they were issued)
-            if token not in SESSION_TOKENS:
-                await websocket.close(code=4001, reason="Invalid token")
-                return
+        if not token:
+            await websocket.close(code=4001, reason="Authentication required")
+            return
+        is_valid_token = (token in SESSION_TOKENS) or (_validate_device_session(token) is not None)
+        if not is_valid_token:
+            await websocket.close(code=4001, reason="Invalid or expired session token")
+            return
+    else:
+        if not token:
+            token = "anon"
 
+    # 4. Strict process ownership verification BEFORE accepting
+    record = await _execution_manager.pm.get(process_id)
+    if not record:
+        hist = await _execution_manager.pm.get_history()
+        matching = [r for r in hist if r.process_id == process_id]
+        if matching:
+            record = matching[0]
+
+    if not record:
+        await websocket.close(code=4004, reason="Process not found")
+        return
+
+    # Reject connection immediately if ownership verification fails
+    # NEVER use SESSION_TOKENS membership as a substitute for process ownership!
+    if record.owner_token != token:
+        logger.warning("Rejected WebSocket access to process %s: token mismatch", process_id)
+        await websocket.close(code=4003, reason="Access denied: process belongs to another session")
+        return
+
+    # 5. All security checks passed — accept connection
     await websocket.accept()
 
     try:
-        # Verify process exists and is owned by this token
-        record_dict = await _execution_manager.get_process_status(process_id, token)
-        if not record_dict and token not in SESSION_TOKENS:
-            await websocket.send_json({"type": "error", "message": "Process not found"})
-            await websocket.close()
-            return
+        record_dict = record.to_dict()
 
         # Get the output buffer for this process (terminal mode only)
         buf = terminal_mod.get_buffer(process_id)

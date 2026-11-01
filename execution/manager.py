@@ -33,6 +33,8 @@ DEFAULT_EXECUTION_CONFIG = {
     "timeout_seconds": 300,
     "max_concurrent_processes": 3,
     "allow_desktop_execution": True,
+    "allowed_roots": [],
+    "powershell_override_policy": False,
 }
 
 
@@ -48,9 +50,10 @@ class ExecutionManager:
         # Apply max_concurrent from config
         self.pm.max_concurrent = self._cfg["max_concurrent_processes"]
         logger.info(
-            "ExecutionManager initialised — enabled=%s, max_concurrent=%d",
+            "ExecutionManager initialised — enabled=%s, max_concurrent=%d, allowed_roots=%s",
             self._cfg["enabled"],
             self._cfg["max_concurrent_processes"],
+            self._cfg.get("allowed_roots", []),
         )
 
     def _build_config(self, raw_config: dict) -> dict:
@@ -79,6 +82,14 @@ class ExecutionManager:
     def allowed_extensions(self) -> list[str]:
         return self._cfg.get("allowed_extensions", [".bat", ".cmd", ".ps1", ".py", ".exe"])
 
+    @property
+    def allowed_roots(self) -> list[str]:
+        return self._cfg.get("allowed_roots", [])
+
+    @property
+    def powershell_override_policy(self) -> bool:
+        return bool(self._cfg.get("powershell_override_policy", False))
+
     def get_config_dict(self) -> dict:
         """Return safe config subset for the frontend."""
         return {
@@ -90,6 +101,8 @@ class ExecutionManager:
             "timeout_seconds": self.timeout_seconds,
             "max_concurrent_processes": self._cfg.get("max_concurrent_processes", 3),
             "allow_desktop_execution": self.allow_desktop_execution,
+            "allowed_roots": self.allowed_roots,
+            "powershell_override_policy": self.powershell_override_policy,
         }
 
     def check_enabled(self) -> None:
@@ -115,30 +128,28 @@ class ExecutionManager:
         if mode == "desktop" and not self.allow_desktop_execution:
             raise PermissionError("Desktop execution is disabled in configuration")
 
-        # Full path and security validation
+        # Full path and security validation (including execution.allowed_roots)
         canonical_path, executor_type = validate_execution_request(
             file_path=file_path,
             mode=mode,
             root_restriction=root_restriction,
             allowed_extensions=self.allowed_extensions,
+            allowed_roots=self.allowed_roots,
         )
-
-        # Capacity check
-        if not await self.pm.can_start():
-            max_c = self._cfg.get("max_concurrent_processes", 3)
-            raise RuntimeError(f"Maximum concurrent processes ({max_c}) already running")
 
         import os
         filename = os.path.basename(canonical_path)
 
+        # Atomic capacity check & registration
+        record = await self.pm.try_register(
+            owner_token=owner_token,
+            file_path=canonical_path,
+            filename=filename,
+            executor_type=executor_type,
+            mode=mode,
+        )
+
         if mode == "terminal":
-            record = await self.pm.register(
-                owner_token=owner_token,
-                file_path=canonical_path,
-                filename=filename,
-                executor_type=executor_type,
-                mode="terminal",
-            )
             # Launch as background asyncio task
             asyncio.create_task(
                 terminal_mod.run_terminal(
@@ -147,35 +158,43 @@ class ExecutionManager:
                     executor_type=executor_type,
                     timeout_seconds=self.timeout_seconds,
                     process_manager=self.pm,
+                    powershell_override=self.powershell_override_policy,
                 )
             )
             return record.to_dict()
 
         elif mode == "desktop":
-            record = await self.pm.register(
-                owner_token=owner_token,
-                file_path=canonical_path,
-                filename=filename,
-                executor_type=executor_type,
-                mode="desktop",
-            )
             try:
-                pid, msg = desktop_mod.launch_desktop(canonical_path, executor_type)
-                await self.pm.mark_running(record.process_id, pid, None)
-                # Desktop processes are not tracked after launch — mark complete immediately
-                await self.pm.mark_completed(record.process_id, 0)
-                rec = await self.pm.get_history(owner_token)
-                # Find the record we just completed
-                matching = [r for r in rec if r.process_id == record.process_id]
-                if matching:
-                    return matching[0].to_dict()
+                proc = desktop_mod.launch_desktop(
+                    canonical_path,
+                    executor_type,
+                    powershell_override=self.powershell_override_policy,
+                )
+                await self.pm.mark_running(record.process_id, proc.pid, proc)
+                # Background monitor task tracks the actual process lifecycle
+                asyncio.create_task(
+                    self._monitor_desktop_process(record.process_id, proc)
+                )
                 return record.to_dict()
             except Exception as e:
                 await self.pm.mark_failed(record.process_id, str(type(e).__name__))
                 raise
 
         else:
+            await self.pm.unregister(record.process_id)
             raise ValueError(f"Unknown mode: {mode}")
+
+    async def _monitor_desktop_process(self, process_id: str, proc) -> None:
+        """Monitor desktop process lifecycle until exit, updating status accurately."""
+        loop = asyncio.get_running_loop()
+        try:
+            exit_code = await loop.run_in_executor(None, proc.wait)
+            await self.pm.mark_completed(process_id, exit_code)
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            logger.error("Error monitoring desktop process %s: %s", process_id, e)
+            await self.pm.mark_failed(process_id, str(type(e).__name__))
 
     async def stop_process(self, process_id: str, owner_token: str) -> bool:
         return await self.pm.stop_process(process_id, owner_token)

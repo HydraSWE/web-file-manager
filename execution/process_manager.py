@@ -93,6 +93,41 @@ class ProcessManager:
             # Active dictionary tracks all pending and currently running jobs
             return len(self._active) < self.max_concurrent
 
+    async def try_register(
+        self,
+        owner_token: str,
+        file_path: str,
+        filename: str,
+        executor_type: str,
+        mode: str,
+    ) -> ExecutionRecord:
+        """
+        Atomically check capacity and register a new execution record under the lock.
+        Eliminates race condition between can_start() and register() under concurrent calls.
+        Raises RuntimeError if maximum concurrent capacity is reached.
+        """
+        async with self._lock:
+            if len(self._active) >= self.max_concurrent:
+                raise RuntimeError(
+                    f"Maximum concurrent processes ({self.max_concurrent}) already running"
+                )
+            process_id = secrets.token_urlsafe(16)
+            record = ExecutionRecord(
+                process_id=process_id,
+                owner_token=owner_token,
+                file_path=file_path,
+                filename=filename,
+                executor_type=executor_type,
+                mode=mode,
+                started_at=time.time(),
+            )
+            self._active[process_id] = record
+            logger.info(
+                "Registered execution job %s for file %s (mode=%s, active=%d/%d)",
+                process_id, filename, mode, len(self._active), self.max_concurrent
+            )
+            return record
+
     async def register(
         self,
         owner_token: str,
@@ -101,21 +136,19 @@ class ProcessManager:
         executor_type: str,
         mode: str,
     ) -> ExecutionRecord:
-        """Create and register a new execution record. Returns the record."""
-        process_id = secrets.token_urlsafe(16)
-        record = ExecutionRecord(
-            process_id=process_id,
+        """Atomic registration wrapper."""
+        return await self.try_register(
             owner_token=owner_token,
             file_path=file_path,
             filename=filename,
             executor_type=executor_type,
             mode=mode,
-            started_at=time.time(),
         )
+
+    async def unregister(self, process_id: str) -> None:
+        """Remove a job from active records if launch failed before starting."""
         async with self._lock:
-            self._active[process_id] = record
-        logger.info("Registered execution job %s for file %s (mode=%s)", process_id, filename, mode)
-        return record
+            self._active.pop(process_id, None)
 
     async def get(self, process_id: str) -> Optional[ExecutionRecord]:
         async with self._lock:

@@ -33,6 +33,13 @@ const STATE = {
   panY: 0,
   isPanning: false,
   startPanX: 0,
+  dragSuppressedClick: false,
+  lastClickedIndex: -1,
+  dragStart: { x: 0, y: 0 },
+  touchTimer: null,
+  longPressFired: false,
+  longPressThreshold: 320,
+  isSelecting: false,
   startPanY: 0,
   touchInitialDist: 0,
   touchInitialScale: 1.0
@@ -48,6 +55,8 @@ document.addEventListener('DOMContentLoaded', async () => {
   updateViewToggleUI();
   updateClipboardUI();
   setupClipboardButtonInteractions();
+  setupMouseSelection();
+  setupTouchSelection();
 
   // Check auth requirement & configuration
   try {
@@ -451,19 +460,50 @@ function renderItems(items) {
 function createGridCard(item) {
   const isSelected = STATE.selectedPaths.has(item.path);
   const card = document.createElement('div');
-  card.className = `group relative rounded-2xl p-3 flex flex-col items-center text-center transition cursor-pointer select-none touch-press border ${
+  card.dataset.path = item.path;
+  card.className = `file-card group relative rounded-2xl p-3 flex flex-col items-center text-center transition cursor-pointer select-none touch-press border ${
     isSelected
-      ? 'bg-brand-500/20 border-brand-500 shadow-lg shadow-brand-500/15'
+      ? 'is-selected bg-brand-500/15 border-brand-500/60 shadow-lg shadow-black/40'
       : 'bg-surface-card hover:bg-surface-hover border-slate-800 hover:border-slate-700 glow-card'
   }`;
 
-  setupLongPress(card, () => openContextMenu(item));
-
   card.onclick = (e) => {
     if (e.target.closest('.action-btn') || e.target.closest('.select-checkbox')) return;
-    if (STATE.isSelectMode) {
+    if (STATE.dragSuppressedClick) {
+      STATE.dragSuppressedClick = false;
+      return;
+    }
+
+    const isCtrlOrCmd = e.ctrlKey || e.metaKey;
+    const isShift = e.shiftKey;
+
+    if (isShift && STATE.lastClickedIndex !== -1) {
+      const idx = STATE.filteredItems.findIndex(i => i.path === item.path);
+      const start = Math.min(STATE.lastClickedIndex, idx);
+      const end = Math.max(STATE.lastClickedIndex, idx);
+      for (let i = start; i <= end; i++) {
+        if (STATE.filteredItems[i]) STATE.selectedPaths.add(STATE.filteredItems[i].path);
+      }
+      STATE.isSelectMode = true;
+      updateSelectionUI();
+      applyFilters();
+      return;
+    }
+
+    if (isCtrlOrCmd) {
       toggleSelectItem(item.path);
-    } else if (item.is_dir) {
+      STATE.lastClickedIndex = STATE.filteredItems.findIndex(i => i.path === item.path);
+      return;
+    }
+
+    if (STATE.isSelectMode || STATE.selectedPaths.size > 0) {
+      toggleSelectItem(item.path);
+      STATE.lastClickedIndex = STATE.filteredItems.findIndex(i => i.path === item.path);
+      return;
+    }
+
+    // Normal single-click: Open folder or file without conflict
+    if (item.is_dir) {
       loadDirectory(item.path);
     } else {
       openPreviewModal(item);
@@ -474,10 +514,11 @@ function createGridCard(item) {
   const sizeText = item.is_dir ? (item.child_count !== null ? `${item.child_count} items` : 'Folder') : formatBytes(item.size);
 
   card.innerHTML = `
-    <!-- Checkbox in select mode -->
-    <div class="absolute top-2 left-2 z-10 select-checkbox ${STATE.isSelectMode ? 'block' : 'hidden group-hover:block'}">
-      <input type="checkbox" ${isSelected ? 'checked' : ''} onchange="toggleSelectItem('${escapeJs(item.path)}')"
-             class="w-4 h-4 rounded text-brand-500 bg-surface-input border-slate-700 focus:ring-0 cursor-pointer">
+    <!-- Checkbox in select mode or hover -->
+    <div class="absolute top-2 left-2 z-10 select-checkbox ${STATE.isSelectMode || isSelected ? 'block' : 'hidden group-hover:block'}"
+         onclick="event.stopPropagation(); toggleSelectItem('${escapeJs(item.path)}')">
+      <input type="checkbox" ${isSelected ? 'checked' : ''}
+             class="w-4 h-4 rounded text-brand-500 bg-surface-input border-slate-700 focus:ring-0 cursor-pointer pointer-events-none">
     </div>
 
     <!-- Pinned Star Badge -->
@@ -512,17 +553,47 @@ function createGridCard(item) {
 function createListRow(item) {
   const isSelected = STATE.selectedPaths.has(item.path);
   const row = document.createElement('div');
-  row.className = `group flex items-center justify-between px-4 py-3 hover:bg-surface-hover transition cursor-pointer select-none touch-press ${
-    isSelected ? 'bg-brand-500/15' : ''
+  row.dataset.path = item.path;
+  row.className = `list-row group flex items-center justify-between px-4 py-3 hover:bg-surface-hover transition cursor-pointer select-none touch-press ${
+    isSelected ? 'is-selected bg-brand-500/15 border-l-2 border-brand-500' : ''
   }`;
-
-  setupLongPress(row, () => openContextMenu(item));
 
   row.onclick = (e) => {
     if (e.target.closest('.action-btn') || e.target.closest('.select-checkbox')) return;
-    if (STATE.isSelectMode) {
+    if (STATE.dragSuppressedClick) {
+      STATE.dragSuppressedClick = false;
+      return;
+    }
+
+    const isCtrlOrCmd = e.ctrlKey || e.metaKey;
+    const isShift = e.shiftKey;
+
+    if (isShift && STATE.lastClickedIndex !== -1) {
+      const idx = STATE.filteredItems.findIndex(i => i.path === item.path);
+      const start = Math.min(STATE.lastClickedIndex, idx);
+      const end = Math.max(STATE.lastClickedIndex, idx);
+      for (let i = start; i <= end; i++) {
+        if (STATE.filteredItems[i]) STATE.selectedPaths.add(STATE.filteredItems[i].path);
+      }
+      STATE.isSelectMode = true;
+      updateSelectionUI();
+      applyFilters();
+      return;
+    }
+
+    if (isCtrlOrCmd) {
       toggleSelectItem(item.path);
-    } else if (item.is_dir) {
+      STATE.lastClickedIndex = STATE.filteredItems.findIndex(i => i.path === item.path);
+      return;
+    }
+
+    if (STATE.isSelectMode || STATE.selectedPaths.size > 0) {
+      toggleSelectItem(item.path);
+      STATE.lastClickedIndex = STATE.filteredItems.findIndex(i => i.path === item.path);
+      return;
+    }
+
+    if (item.is_dir) {
       loadDirectory(item.path);
     } else {
       openPreviewModal(item);
@@ -536,9 +607,10 @@ function createListRow(item) {
   row.innerHTML = `
     <div class="flex items-center gap-3 min-w-0 pr-2">
       <!-- Checkbox -->
-      <div class="select-checkbox ${STATE.isSelectMode ? 'block' : 'hidden sm:group-hover:block'}">
-        <input type="checkbox" ${isSelected ? 'checked' : ''} onchange="toggleSelectItem('${escapeJs(item.path)}')"
-               class="w-4 h-4 rounded text-brand-500 bg-surface-input border-slate-700 focus:ring-0 cursor-pointer">
+      <div class="select-checkbox ${STATE.isSelectMode || isSelected ? 'block' : 'hidden sm:group-hover:block'}"
+           onclick="event.stopPropagation(); toggleSelectItem('${escapeJs(item.path)}')">
+        <input type="checkbox" ${isSelected ? 'checked' : ''}
+               class="w-4 h-4 rounded text-brand-500 bg-surface-input border-slate-700 focus:ring-0 cursor-pointer pointer-events-none">
       </div>
 
       <!-- Icon -->
@@ -640,19 +712,23 @@ function toggleSelectItem(path) {
   } else {
     STATE.selectedPaths.add(path);
   }
+  STATE.isSelectMode = STATE.selectedPaths.size > 0;
   updateSelectionUI();
   applyFilters();
 }
 
 function selectAll() {
   STATE.filteredItems.forEach(item => STATE.selectedPaths.add(item.path));
+  STATE.isSelectMode = true;
   updateSelectionUI();
   applyFilters();
 }
 
 function deselectAll() {
   STATE.selectedPaths.clear();
+  STATE.isSelectMode = false;
   updateSelectionUI();
+  applyFilters();
 }
 
 function updateSelectionUI() {
@@ -661,10 +737,41 @@ function updateSelectionUI() {
   const count = STATE.selectedPaths.size;
 
   if (count > 0) {
-    bar.classList.remove('hidden');
-    badge.textContent = count;
+    bar?.classList.remove('hidden');
+    if (badge) badge.textContent = count;
+
+    // Smart Download Button Adaptive Label & Icon
+    const dlBtn = document.getElementById('batchDownloadBtn');
+    const dlIcon = document.getElementById('batchDownloadIcon');
+    const dlLabel = document.getElementById('batchDownloadLabel');
+
+    if (count === 1) {
+      const singlePath = Array.from(STATE.selectedPaths)[0];
+      const item = STATE.filteredItems.find(i => i.path === singlePath);
+      if (item && !item.is_dir) {
+        if (dlIcon) dlIcon.setAttribute('data-lucide', 'download');
+        if (dlLabel) dlLabel.textContent = `Download "${item.name}"`;
+        if (dlBtn) dlBtn.title = `Download "${item.name}" (Original Name Protected)`;
+      } else {
+        const folderName = item ? item.name : 'folder';
+        if (dlIcon) dlIcon.setAttribute('data-lucide', 'archive');
+        if (dlLabel) dlLabel.textContent = `Download "${folderName}.zip"`;
+        if (dlBtn) dlBtn.title = `Download "${folderName}.zip" (Nested as-is)`;
+      }
+    } else {
+      if (dlIcon) dlIcon.setAttribute('data-lucide', 'archive');
+      if (dlLabel) dlLabel.textContent = `Download ZIP (${count} items)`;
+      if (dlBtn) dlBtn.title = `Download ZIP (${count} items nested as-is)`;
+    }
+    if (window.lucide) lucide.createIcons();
   } else {
-    bar.classList.add('hidden');
+    bar?.classList.add('hidden');
+  }
+
+  const selectBtn = document.getElementById('selectModeBtn');
+  if (selectBtn) {
+    selectBtn.classList.toggle('bg-brand-500/30', STATE.isSelectMode);
+    selectBtn.classList.toggle('text-brand-400', STATE.isSelectMode);
   }
 }
 
@@ -681,6 +788,35 @@ function batchClipboard(isCut) {
   deselectAll();
 }
 
+async function smartBatchDownload() {
+  const selectedPaths = Array.from(STATE.selectedPaths);
+  if (selectedPaths.length === 0) return;
+
+  // Single File Selected -> Direct download with protected name
+  if (selectedPaths.length === 1) {
+    const singlePath = selectedPaths[0];
+    const item = STATE.filteredItems.find(i => i.path === singlePath);
+    if (item && !item.is_dir) {
+      downloadSingleFile(item.path, item.name);
+      return;
+    }
+  }
+
+  // Single Folder or Multiple Items -> Streams as .zip
+  await batchDownloadZip();
+}
+
+function downloadSingleFile(path, filename) {
+  showToast(`Downloading "${filename}" (Name Protected)...`, 'info');
+  const url = `/api/fs/raw?path=${encodeURIComponent(path)}&download=true`;
+  const a = document.createElement('a');
+  a.href = url;
+  if (filename) a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+}
+
 async function batchDownloadZip() {
   const paths = Array.from(STATE.selectedPaths);
   if (paths.length === 0) return;
@@ -694,15 +830,22 @@ async function batchDownloadZip() {
     });
     if (!res.ok) throw new Error('ZIP archive creation failed');
 
+    let filename = `hydra_bundle_${Date.now()}.zip`;
+    const disposition = res.headers.get('Content-Disposition');
+    if (disposition && disposition.includes('filename=')) {
+      const match = disposition.match(/filename="?([^"]+)"?/);
+      if (match && match[1]) filename = match[1];
+    }
+
     const blob = await res.blob();
     const downloadUrl = window.URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = downloadUrl;
-    a.download = `bundle_${Date.now()}.zip`;
+    a.download = filename;
     document.body.appendChild(a);
     a.click();
     a.remove();
-    showToast('Download started', 'success');
+    showToast(`Download started: ${filename}`, 'success');
   } catch (err) {
     showToast(err.message, 'error');
   }
@@ -1560,34 +1703,142 @@ function handleFileSelected(event) {
   const files = event.target.files;
   if (!files || files.length === 0) return;
   uploadFilesList(files);
+  event.target.value = '';
+}
+
+function handleFolderSelected(event) {
+  const files = event.target.files;
+  if (!files || files.length === 0) return;
+  uploadFilesList(files);
+  event.target.value = '';
+}
+
+function closeUploadDrawer() {
+  document.getElementById('uploadDrawer')?.classList.remove('open');
 }
 
 function setupDragAndDrop() {
-  window.addEventListener('dragover', (e) => e.preventDefault());
-  window.addEventListener('drop', (e) => {
+  const overlay = document.getElementById('dropZoneOverlay');
+  let dragCounter = 0;
+
+  window.addEventListener('dragenter', (e) => {
     e.preventDefault();
-    if (e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files.length > 0) {
-      uploadFilesList(e.dataTransfer.files);
+    dragCounter++;
+    overlay?.classList.add('drag-active');
+  });
+
+  window.addEventListener('dragleave', (e) => {
+    e.preventDefault();
+    dragCounter--;
+    if (dragCounter <= 0) {
+      overlay?.classList.remove('drag-active');
+    }
+  });
+
+  window.addEventListener('dragover', (e) => e.preventDefault());
+
+  window.addEventListener('drop', async (e) => {
+    e.preventDefault();
+    dragCounter = 0;
+    overlay?.classList.remove('drag-active');
+
+    const items = e.dataTransfer.items;
+    if (!items || items.length === 0) {
+      if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+        uploadFilesList(e.dataTransfer.files);
+      }
+      return;
+    }
+
+    const collectedFiles = [];
+    showToast('Scanning dropped folder hierarchy...', 'info');
+
+    for (let i = 0; i < items.length; i++) {
+      const item = items[i];
+      if (item.webkitGetAsEntry) {
+        const entry = item.webkitGetAsEntry();
+        if (entry) {
+          await traverseFileTree(entry, "", collectedFiles);
+        }
+      } else if (item.kind === 'file') {
+        const file = item.getAsFile();
+        if (file) collectedFiles.push(file);
+      }
+    }
+
+    if (collectedFiles.length > 0) {
+      uploadFilesList(collectedFiles);
     }
   });
 }
 
+async function traverseFileTree(item, path, fileList) {
+  path = path || "";
+  if (item.isFile) {
+    await new Promise((resolve) => {
+      item.file((file) => {
+        Object.defineProperty(file, 'webkitRelativePath', {
+          value: path ? `${path}/${file.name}` : file.name
+        });
+        fileList.push(file);
+        resolve();
+      });
+    });
+  } else if (item.isDirectory) {
+    const dirReader = item.createReader();
+    const entries = await new Promise((resolve) => {
+      dirReader.readEntries((results) => resolve(results));
+    });
+    for (const entry of entries) {
+      await traverseFileTree(entry, path ? `${path}/${item.name}` : item.name, fileList);
+    }
+  }
+}
+
 function uploadFilesList(files) {
-  const formData = new FormData();
-  formData.append('dir_path', STATE.currentPath);
-  for (let i = 0; i < files.length; i++) {
-    formData.append('files', files[i]);
+  const fileArray = Array.from(files);
+  if (fileArray.length === 0) return;
+
+  closeUploadModal();
+
+  const drawer = document.getElementById('uploadDrawer');
+  const drawerTitle = document.getElementById('uploadDrawerTitle');
+  const drawerStats = document.getElementById('uploadDrawerStats');
+  const pBar = document.getElementById('uploadOverallProgress');
+  const fileListUI = document.getElementById('uploadFileList');
+
+  if (drawer) drawer.classList.add('open');
+  if (drawerTitle) drawerTitle.textContent = `Uploading ${fileArray.length} items...`;
+  if (pBar) pBar.style.width = '0%';
+  if (fileListUI) {
+    fileListUI.innerHTML = '';
+    fileArray.slice(0, 15).forEach(f => {
+      const relPath = f.webkitRelativePath || f.name;
+      const row = document.createElement('div');
+      row.className = 'flex items-center justify-between text-slate-300 py-0.5 border-b border-slate-800/50';
+      row.innerHTML = `
+        <span class="truncate max-w-[200px]" title="${escapeHtml(relPath)}">${escapeHtml(relPath)}</span>
+        <span class="text-slate-500 text-[10px] shrink-0 font-mono">${formatBytes(f.size)}</span>
+      `;
+      fileListUI.appendChild(row);
+    });
+    if (fileArray.length > 15) {
+      const moreRow = document.createElement('div');
+      moreRow.className = 'text-slate-500 text-[10px] text-center pt-1';
+      moreRow.textContent = `+ ${fileArray.length - 15} more files`;
+      fileListUI.appendChild(moreRow);
+    }
   }
 
-  const pContainer = document.getElementById('uploadProgressContainer');
-  const pBar = document.getElementById('uploadProgressBar');
-  const pText = document.getElementById('uploadPercent');
-  const pStatus = document.getElementById('uploadStatusText');
+  const formData = new FormData();
+  formData.append('dir_path', STATE.currentPath);
 
-  pContainer.classList.remove('hidden');
-  pBar.style.width = '0%';
-  pText.textContent = '0%';
-  pStatus.textContent = `Uploading ${files.length} file(s)...`;
+  const relPaths = fileArray.map(f => f.webkitRelativePath || f.name);
+  formData.append('relative_paths', JSON.stringify(relPaths));
+
+  for (let i = 0; i < fileArray.length; i++) {
+    formData.append('files', fileArray[i]);
+  }
 
   const xhr = new XMLHttpRequest();
   xhr.open('POST', '/api/fs/upload', true);
@@ -1595,19 +1846,26 @@ function uploadFilesList(files) {
     xhr.setRequestHeader('X-Auth-Token', STATE.authToken);
   }
 
+  const startTime = Date.now();
   xhr.upload.onprogress = (e) => {
     if (e.lengthComputable) {
       const pct = Math.round((e.loaded / e.total) * 100);
-      pBar.style.width = `${pct}%`;
-      pText.textContent = `${pct}%`;
+      if (pBar) pBar.style.width = `${pct}%`;
+      const elapsedSec = (Date.now() - startTime) / 1000;
+      const mbps = elapsedSec > 0 ? ((e.loaded / 1024 / 1024) / elapsedSec).toFixed(1) : '0.0';
+      if (drawerStats) {
+        drawerStats.textContent = `${pct}% • ${mbps} MB/s (${formatBytes(e.loaded)} / ${formatBytes(e.total)})`;
+      }
     }
   };
 
   xhr.onload = () => {
     if (xhr.status === 200) {
-      showToast(`Uploaded ${files.length} file(s) successfully!`, 'success');
-      closeUploadModal();
+      if (pBar) pBar.style.width = '100%';
+      if (drawerTitle) drawerTitle.textContent = `Upload Completed (${fileArray.length} items)!`;
+      showToast(`Uploaded ${fileArray.length} item(s) successfully! Nested hierarchy preserved.`, 'success');
       refreshFolder();
+      setTimeout(() => closeUploadDrawer(), 3500);
     } else {
       showToast('Upload error: ' + xhr.responseText, 'error');
     }
@@ -2142,4 +2400,208 @@ function fallbackCopyText(text) {
   } catch (err) {
     console.warn('Fallback clipboard copy failed:', err);
   }
+}
+
+
+// ============================================================
+// MOUSE & TOUCH MULTI-SELECT HANDLERS (Conflict-Free)
+// ============================================================
+
+function setupMouseSelection() {
+  const marquee = document.getElementById('selectionMarquee');
+  if (!marquee) return;
+
+  let isMouseDown = false;
+  let startX = 0, startY = 0;
+  let baselineSelected = new Set();
+
+  window.addEventListener('mousedown', (e) => {
+    if (e.button !== 0) return;
+    // Don't drag on inputs, dialogs, floating action bar, header, or nav
+    if (e.target.closest('#batchActionBar') || e.target.closest('.modal') || e.target.closest('header') || e.target.closest('nav') || e.target.closest('button') || e.target.closest('input')) {
+      return;
+    }
+
+    isMouseDown = true;
+    startX = e.clientX;
+    startY = e.clientY;
+    STATE.isSelecting = false;
+
+    if (e.ctrlKey || e.metaKey) {
+      baselineSelected = new Set(STATE.selectedPaths);
+    } else if (!e.target.closest('.file-card') && !e.target.closest('.list-row')) {
+      // Clicked on empty canvas background -> clear selection
+      STATE.selectedPaths.clear();
+      STATE.isSelectMode = false;
+      updateSelectionUI();
+      applyFilters();
+      baselineSelected.clear();
+    } else {
+      baselineSelected = new Set(STATE.selectedPaths);
+    }
+  });
+
+  window.addEventListener('mousemove', (e) => {
+    if (!isMouseDown) return;
+    const dx = e.clientX - startX;
+    const dy = e.clientY - startY;
+    if (Math.hypot(dx, dy) > 8 && !STATE.isSelecting) {
+      STATE.isSelecting = true;
+      marquee.style.display = 'block';
+    }
+
+    if (STATE.isSelecting) {
+      const left = Math.min(startX, e.clientX);
+      const top = Math.min(startY, e.clientY);
+      const width = Math.abs(dx);
+      const height = Math.abs(dy);
+
+      marquee.style.left = `${left}px`;
+      marquee.style.top = `${top}px`;
+      marquee.style.width = `${width}px`;
+      marquee.style.height = `${height}px`;
+
+      checkMarqueeIntersection({ left, top, right: left + width, bottom: top + height }, e.ctrlKey || e.metaKey, baselineSelected);
+    }
+  });
+
+  window.addEventListener('mouseup', (e) => {
+    if (!isMouseDown) return;
+    isMouseDown = false;
+    if (STATE.isSelecting) {
+      STATE.isSelecting = false;
+      STATE.dragSuppressedClick = true;
+      marquee.style.display = 'none';
+      STATE.isSelectMode = STATE.selectedPaths.size > 0;
+      updateSelectionUI();
+      applyFilters();
+    }
+  });
+}
+
+function setupTouchSelection() {
+  const marquee = document.getElementById('selectionMarquee');
+  const ring = document.getElementById('longPressRing');
+  if (!marquee || !ring) return;
+
+  let isTouching = false;
+  let startX = 0, startY = 0;
+  let baselineSelected = new Set();
+
+  window.addEventListener('touchstart', (e) => {
+    if (e.touches.length !== 1) return;
+    const touch = e.touches[0];
+    if (e.target.closest('#batchActionBar') || e.target.closest('.modal') || e.target.closest('header') || e.target.closest('nav') || e.target.closest('button') || e.target.closest('input')) {
+      return;
+    }
+
+    isTouching = true;
+    STATE.longPressFired = false;
+    STATE.isSelecting = false;
+    startX = touch.clientX;
+    startY = touch.clientY;
+
+    ring.style.left = `${startX}px`;
+    ring.style.top = `${startY}px`;
+
+    clearTimeout(STATE.touchTimer);
+    STATE.touchTimer = setTimeout(() => {
+      if (!isTouching) return;
+      STATE.longPressFired = true;
+      STATE.isSelecting = true;
+      if (navigator.vibrate) navigator.vibrate(35);
+      ring.classList.add('active');
+
+      marquee.style.display = 'block';
+      marquee.style.left = `${startX}px`;
+      marquee.style.top = `${startY}px`;
+      marquee.style.width = '0px';
+      marquee.style.height = '0px';
+
+      baselineSelected = new Set(STATE.selectedPaths);
+    }, STATE.longPressThreshold);
+  }, { passive: false });
+
+  window.addEventListener('touchmove', (e) => {
+    if (!isTouching) return;
+    const touch = e.touches[0];
+    const dx = touch.clientX - startX;
+    const dy = touch.clientY - startY;
+
+    if (!STATE.longPressFired) {
+      if (Math.hypot(dx, dy) > 10) {
+        clearTimeout(STATE.touchTimer);
+        ring.classList.remove('active');
+      }
+      return;
+    }
+
+    e.preventDefault(); // lock scroll while drag-selecting on mobile
+
+    const left = Math.min(startX, touch.clientX);
+    const top = Math.min(startY, touch.clientY);
+    const width = Math.abs(dx);
+    const height = Math.abs(dy);
+
+    marquee.style.left = `${left}px`;
+    marquee.style.top = `${top}px`;
+    marquee.style.width = `${width}px`;
+    marquee.style.height = `${height}px`;
+
+    checkMarqueeIntersection({ left, top, right: left + width, bottom: top + height }, false, baselineSelected);
+  }, { passive: false });
+
+  const endTouch = () => {
+    if (!isTouching) return;
+    isTouching = false;
+    clearTimeout(STATE.touchTimer);
+    ring.classList.remove('active');
+
+    if (STATE.isSelecting) {
+      STATE.isSelecting = false;
+      STATE.dragSuppressedClick = true;
+      marquee.style.display = 'none';
+      STATE.isSelectMode = STATE.selectedPaths.size > 0;
+      updateSelectionUI();
+      applyFilters();
+    }
+  };
+
+  window.addEventListener('touchend', endTouch);
+  window.addEventListener('touchcancel', endTouch);
+}
+
+function checkMarqueeIntersection(box, isCtrlHeld, baselineSelected) {
+  const cards = document.querySelectorAll('.file-card, .list-row');
+  cards.forEach(card => {
+    const path = card.dataset.path;
+    if (!path) return;
+    const rect = card.getBoundingClientRect();
+    const intersects = !(
+      rect.right < box.left ||
+      rect.left > box.right ||
+      rect.bottom < box.top ||
+      rect.top > box.bottom
+    );
+
+    if (intersects) {
+      if (isCtrlHeld) {
+        if (baselineSelected.has(path)) {
+          STATE.selectedPaths.delete(path);
+        } else {
+          STATE.selectedPaths.add(path);
+        }
+      } else {
+        STATE.selectedPaths.add(path);
+      }
+      card.classList.add('is-selected');
+    } else {
+      if (!isCtrlHeld) {
+        STATE.selectedPaths.delete(path);
+        card.classList.remove('is-selected');
+      }
+    }
+  });
+
+  updateSelectionUI();
 }

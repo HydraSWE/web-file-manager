@@ -120,6 +120,14 @@ def _generate_local_fallback_qr(url: str) -> bytes:
 
 
 def generate_branded_qr_png(url: str, output_path: str = None, shape: str = "star") -> bytes:
+    """
+    Generates a signature branded QR code:
+      1. Calls Hydra Cloud API (https://hydra-qr-gen.vercel.app/api/generate) to fetch
+         the signature halftone QR code.
+      2. If offline, timeout, or network error occurs, silently falls back to the
+         local styled QR generator.
+      3. Caches by URL so responses are instant (0ms).
+    """
     cache_key = f"{url}:{shape}"
     if cache_key in _QR_CACHE:
         png_bytes = _QR_CACHE[cache_key]

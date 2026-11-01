@@ -13,6 +13,23 @@
 ## ✨ Highlights & Capabilities
 
 - 📱 **Mobile-First Touch Design**: Modern dark theme, 44px+ hit targets, bottom drawer context menus, long-press actions, and fluid two-finger **pinch-to-zoom** on images.
+- 🛡️ **PC-Controlled Multi-Owner Security & Universal Device Pairing**:
+  - **Windows PC Root Authority**: The Windows PC is the sole root authority; remote devices receive delegated capabilities and can never independently hijack or own the PC.
+  - **Universal LAN Mobile Cryptography**: Locally bundled TweetNaCl (`nacl.min.js`) enables audited RFC 8032 Ed25519 cryptographic pairing and challenge-response signing over plain HTTP local Wi-Fi connections on Android and iOS browsers with zero external network or build steps.
+  - **Windows Authentication Broker**: Named pipe IPC (`\\.\pipe\HydraAuthBroker`) prompts native **Windows Hello** (biometrics / PIN) on the PC screen for first-time owner registration, co-owner elevation, and security unlocks.
+  - **Granular Capability Permissions**: Fine-grained per-device authorization (`filesystem.read`, `filesystem.write`, `execution.script`, `execution.desktop`, `process.manage`, `system.monitor`).
+  - **Emergency Security Lockdown**: 1-click platform freeze across all connected devices, strictly requiring local Windows Hello on the PC to restore operations.
+  - **Windows-Local Recovery**: Automatic local recovery on `localhost:8088` via Windows Hello if browser storage is cleared.
+- 📦 **Bulk Multi-Select & Conflict-Free Selection Engine**:
+  - Desktop left-click marquee drag selection and mobile touch long-press lasso with haptic feedback.
+  - Conflict-free interaction: single-click opens files/folders normally when 0 selected; card clicks toggle selection when active; dedicated checkbox badge.
+- 🛡️ **Smart Download Engine (Name Protection vs. Nested ZIPs)**:
+  - Single files download directly with exact original filename and extension preserved (zero unwanted ZIP wrapping).
+  - Selected folders and multi-file selections stream as cleanly nested `.zip` archives with automatic background temp file cleanup.
+- 📤 **Mobile Multi-Upload & Recursive Directory Ingestion**:
+  - 1-tap multi-file selection from phone photo galleries or document pickers.
+  - Upload complete nested folder hierarchies via `webkitdirectory` or desktop drag-and-drop.
+  - Floating non-blocking upload drawer with real-time transfer speed (`MB/s`) and progress bar.
 - ⚡ **Native Windows File Execution Engine**: Securely run scripts (`.bat`, `.cmd`, `.ps1`, `.py`) and desktop applications (`.exe`) directly from your browser.
   - **Browser Terminal**: Real-time WebSocket output streaming, ANSI color support, elapsed duration timers, process exit codes, and interactive standard input (`stdin`).
   - **Windows Desktop**: Launch applications or visible CMD/PowerShell consoles directly on the host desktop session preserving working directories.
@@ -153,8 +170,9 @@ The execution engine provides native Windows script and executable launching cap
 
 ## 📖 Additional Documentation & Changelog
 
-For detailed architectural diagrams, WebSocket protocols, and full post-release specifications, see:
-- 📄 [**POST_RELEASE_UPDATES.md**](POST_RELEASE_UPDATES.md) — Comprehensive technical guide to execution, chat heads multitasking, and folder template customization.
+For detailed architectural diagrams, WebSocket protocols, and full release specifications, see:
+- 📄 [**NEW_FEATURES_POST_RELEASE.md**](NEW_FEATURES_POST_RELEASE.md) (formerly `POST_RELEASE_UPDATES.md`) — Comprehensive technical guide to script execution, chat heads multitasking, and folder template customization.
+- 📄 [**V3_FEATURES_SPECIFICATION.md**](V3_FEATURES_SPECIFICATION.md) — Comprehensive technical specification for Version 3.0: PC-Controlled Multi-Owner Security & Cryptographic Device Pairing, Universal LAN Mobile Cryptography (TweetNaCl), Conflict-Free Bulk Multi-Select, Name-Protected Smart Downloads, and Mobile Multi-Upload with Recursive Directory Ingestion.
 
 ---
 
@@ -164,6 +182,7 @@ For detailed architectural diagrams, WebSocket protocols, and full post-release 
 - **Execution Engine**: Native Windows Process API (`asyncio.create_subprocess_exec`, `subprocess.Popen`, Windows Creation Flags)
 - **Frontend**: Single-Page Application (HTML5, [Tailwind CSS CDN](https://tailwindcss.com/), Vanilla JavaScript, [Lucide Icons](https://lucide.dev/))
 - **Networking**: `0.0.0.0` interface binding with 3-tier LAN IP auto-detection (UDP socket routing -> hostname enumeration -> `ipconfig`/`ifconfig` fallback)
+- **Cryptography & Security**: TweetNaCl (Pure JS RFC 8032 Ed25519), WebCrypto API, Argon2id, Windows Named Pipe IPC (`\\.\pipe\HydraAuthBroker`), Windows Hello / CredUI
 - **Zero Build Step**: No `npm`, `vite`, `webpack`, or Node.js required.
 
 ---

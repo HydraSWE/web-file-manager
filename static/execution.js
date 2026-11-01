@@ -893,23 +893,18 @@ document.addEventListener('keydown', (e) => {
   };
 })();
 
-(function patchCardClick() {
+// Double-click execution integration (preserves original single-click preview, selection, & drag suppression)
+(function patchCardDblClick() {
   const origGrid = window.createGridCard;
   if (origGrid) {
     window.createGridCard = function(item) {
       const card = origGrid(item);
-      if (isExecutableItem(item) && isExecutionEnabled()) {
-        card.onclick = function(e) {
+      if (isExecutableItem(item)) {
+        card.ondblclick = function(e) {
           if (e.target.closest('.action-btn') || e.target.closest('.select-checkbox')) return;
-          if (STATE.isSelectMode) {
-            toggleSelectItem(item.path);
-            return;
+          if (isExecutionEnabled()) {
+            openRunConfirmModal(item);
           }
-          if (item.is_dir) {
-            loadDirectory(item.path);
-            return;
-          }
-          openRunConfirmModal(item);
         };
       }
       return card;
@@ -920,14 +915,12 @@ document.addEventListener('keydown', (e) => {
   if (origList) {
     window.createListRow = function(item) {
       const row = origList(item);
-      if (isExecutableItem(item) && isExecutionEnabled()) {
-        row.onclick = function(e) {
+      if (isExecutableItem(item)) {
+        row.ondblclick = function(e) {
           if (e.target.closest('.action-btn') || e.target.closest('.select-checkbox')) return;
-          if (STATE.isSelectMode) {
-            toggleSelectItem(item.path);
-            return;
+          if (isExecutionEnabled()) {
+            openRunConfirmModal(item);
           }
-          openRunConfirmModal(item);
         };
       }
       return row;

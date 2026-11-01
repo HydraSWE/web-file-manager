@@ -54,6 +54,17 @@ desktop.ini
 archive_*.zip
 top_bar.png
 
-# User runtime state
+# User runtime state & credentials
 favorites.json
 .sessions.json
+config.json
+hydra_security.db
+hydra_security.db*
+broker.key
+broker.pub
+.env
+.env.*
+!.env.example
+agents.md
+AGENTS.md
+

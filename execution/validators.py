@@ -45,8 +45,9 @@ def supports_terminal_mode(extension: str) -> bool:
 def validate_execution_request(
     file_path: str,
     mode: str,
-    root_restriction: str,
-    allowed_extensions: list[str],
+    root_restriction: str = "",
+    allowed_extensions: list[str] | None = None,
+    allowed_roots: list[str] | None = None,
 ) -> tuple[str, str]:
     """
     Validate a file execution request completely.
@@ -58,24 +59,44 @@ def validate_execution_request(
     1. Path is non-empty
     2. Extension is in the configured allowlist
     3. Canonical path resolution (resolves symlinks, prevents traversal)
-    4. Root restriction enforcement
+    4. Boundary enforcement:
+       a) root_restriction (file manager root, if configured)
+       b) allowed_roots (dedicated execution allowed roots, if configured)
+       * Note: If both root_restriction and allowed_roots are empty,
+         execution is unrestricted across the host filesystem. An empty list
+         is not treated as a zero-access restriction.
     5. File exists and is a regular file (not a directory or special file)
     6. Mode is compatible with extension
     """
     if not file_path or not file_path.strip():
         raise ValueError("File path must not be empty")
 
-    # Normalise and resolve canonical path (no symlink following for security)
+    # Normalise and resolve canonical path (resolves symlinks, prevents traversal)
     try:
         canonical = os.path.realpath(os.path.normpath(file_path))
     except Exception:
         raise ValueError("Invalid file path")
 
-    # Enforce root restriction if configured
+    # 4a. Enforce file-manager root restriction if configured
     if root_restriction and root_restriction.strip():
         canonical_root = os.path.realpath(os.path.normpath(root_restriction))
         if not (canonical == canonical_root or canonical.startswith(canonical_root + os.sep)):
-            raise PermissionError("Access denied: path is outside the configured root boundary")
+            raise PermissionError("Access denied: path is outside the configured file manager root boundary")
+
+    # 4b. Enforce dedicated execution allowed_roots if configured
+    if allowed_roots:
+        clean_allowed = [
+            os.path.realpath(os.path.normpath(r))
+            for r in allowed_roots
+            if r and str(r).strip()
+        ]
+        if clean_allowed:
+            is_inside_allowed = any(
+                canonical == r or canonical.startswith(r + os.sep)
+                for r in clean_allowed
+            )
+            if not is_inside_allowed:
+                raise PermissionError("Access denied: path is outside the configured execution roots (allowed_roots)")
 
     # Extension validation — check against BOTH the static set and configured allowlist
     _, ext = os.path.splitext(canonical)

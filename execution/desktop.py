@@ -29,51 +29,60 @@ CREATE_NEW_CONSOLE = 0x00000010      # Opens in a new visible console window
 DETACHED_PROCESS   = 0x00000008      # No inherited console (for GUI apps)
 
 
-def _build_desktop_command(canonical_path: str, executor_type: str) -> tuple[list[str], int]:
+def _build_desktop_command(
+    canonical_path: str,
+    executor_type: str,
+    powershell_override: bool = False,
+) -> tuple[list[str] | str, int]:
     """
     Build the command line and creation flags for desktop mode.
 
-    Returns (args_list, creation_flags).
+    Returns (args, creation_flags). args may be a list or formatted command string.
 
-    Security:
-    - No shell=True
-    - No user-supplied interpreter or arguments
-    - sys.executable for Python scripts (same environment as server)
+    Security & Process Tracking:
+    - Never uses shell=True
+    - Does NOT use 'cmd.exe /C start' wrapper so the returned Popen handle tracks
+      the actual interactive process / window PID directly.
+    - CREATE_NEW_CONSOLE ensures visible interactive window on Windows.
+    - Python paths and script paths containing spaces or metacharacters are safely quoted.
+    - PowerShell respects system policy by default; bypass requires explicit powershell_override.
     """
     if executor_type == "batch":
-        # Open a new CMD console window; /K keeps the window open after the script exits
-        # so the user can read the output. The script path is a single argument.
+        # Launch cmd.exe /K directly with CREATE_NEW_CONSOLE so proc tracks the console window
         return (
-            ["cmd.exe", "/C", "start", "cmd.exe", "/K", canonical_path],
+            ["cmd.exe", "/K", canonical_path],
             CREATE_NEW_CONSOLE,
         )
 
     elif executor_type == "powershell":
-        # Open a new PowerShell window. -NoExit keeps it open after the script finishes.
+        # Open a new visible PowerShell console window.
+        # System execution policy is respected by default unless powershell_override is explicitly set.
+        cmd = ["powershell.exe", "-NoExit"]
+        if powershell_override:
+            cmd.extend(["-ExecutionPolicy", "Bypass"])
+        cmd.extend(["-File", canonical_path])
         return (
-            [
-                "powershell.exe",
-                "-NoExit",
-                "-ExecutionPolicy", "Bypass",
-                "-File", canonical_path,
-            ],
+            cmd,
             CREATE_NEW_CONSOLE,
         )
 
     elif executor_type == "python":
         python_exe = sys.executable
-        # For desktop Python: open a CMD window that runs python and keeps it open
+        # Use outer double quotes for cmd.exe /K to protect against cmd.exe quote-stripping
+        # when both interpreter path and script path contain spaces.
+        cmd_str = f'cmd.exe /K ""{python_exe}" "{canonical_path}""'
         return (
-            ["cmd.exe", "/C", "start", "cmd.exe", "/K", python_exe, canonical_path],
+            cmd_str,
             CREATE_NEW_CONSOLE,
         )
 
     elif executor_type == "exe":
-        # EXE: launch directly. GUI apps get DETACHED_PROCESS so they don't
-        # inherit the server's console (which would be invisible or confusing).
+        # EXE: launched directly with CREATE_NEW_CONSOLE.
+        # Windows creates a new console for console subsystem EXEs,
+        # while Windows GUI subsystem EXEs ignore CREATE_NEW_CONSOLE and display their GUI.
         return (
             [canonical_path],
-            DETACHED_PROCESS,
+            CREATE_NEW_CONSOLE,
         )
 
     else:
@@ -83,21 +92,25 @@ def _build_desktop_command(canonical_path: str, executor_type: str) -> tuple[lis
 def launch_desktop(
     canonical_path: str,
     executor_type: str,
-) -> tuple[int, str]:
+    powershell_override: bool = False,
+) -> subprocess.Popen:
     """
-    Launch a file on the Windows desktop.
+    Launch a file on the Windows desktop and return the Popen process handle.
 
-    Returns (pid, status_message).
-    Raises on failure.
+    The returned Popen object provides:
+    - The actual PID of the process / console window
+    - Direct lifecycle monitoring (.poll() and .wait())
+    - Safe process tree termination via taskkill
 
-    The server process runs in the user's interactive session (via run.bat),
-    so the launched window will appear on the desktop.
+    Raises on launch failure.
     """
     if os.name != "nt":
         raise OSError("Desktop execution is only supported on Windows")
 
     working_dir = os.path.dirname(canonical_path) or os.getcwd()
-    args, creation_flags = _build_desktop_command(canonical_path, executor_type)
+    args, creation_flags = _build_desktop_command(
+        canonical_path, executor_type, powershell_override=powershell_override
+    )
 
     logger.info(
         "Desktop launch: executor=%s, file=%s, flags=0x%X",
@@ -111,12 +124,9 @@ def launch_desktop(
             args,
             cwd=working_dir,
             creationflags=creation_flags,
-            # No stdin/stdout/stderr redirection — desktop window handles its own I/O
             stdin=subprocess.DEVNULL,
-            # Do NOT set stdout/stderr — that would suppress the window output
         )
-        pid = proc.pid
-        return pid, f"Launched on desktop (PID {pid})"
+        return proc
 
     except FileNotFoundError as e:
         raise FileNotFoundError(f"Executable not found: {os.path.basename(canonical_path)}") from e

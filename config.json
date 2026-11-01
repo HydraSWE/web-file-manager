@@ -4,7 +4,7 @@
   "port": 8088,
   "host": "0.0.0.0",
   "root_path": "",
-  "pin": "017wwwwoipq",
+  "pin": "",
   "allow_recycle_bin": true,
   "allow_permanent_delete": true,
   "show_hidden_files": false,
@@ -22,6 +22,8 @@
     "default_script_mode": "terminal",
     "timeout_seconds": 300,
     "max_concurrent_processes": 3,
-    "allow_desktop_execution": true
+    "allow_desktop_execution": true,
+    "allowed_roots": [],
+    "powershell_override_policy": false
   }
 }

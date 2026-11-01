@@ -5,7 +5,7 @@ cd /d "%~dp0"
 if defined APP_NAME (
     title %APP_NAME%
 ) else (
-    title Web File Manager
+    title Hydra Web File Manager
 )
 
 set "PYTHON_EXE="
@@ -24,18 +24,19 @@ if not defined PYTHON_EXE (
 )
 
 echo ========================================================
-echo   Web File Manager
+echo   Hydra Web File Manager & Windows Security
 echo   Using Python: %PYTHON_EXE%
 echo ========================================================
 echo.
 
-"%PYTHON_EXE%" -c "import fastapi, uvicorn, qrcode, multipart" >nul 2>&1
+"%PYTHON_EXE%" -c "import fastapi, uvicorn, qrcode, multipart, cryptography, argon2, aiofiles" >nul 2>&1
 if %errorlevel% neq 0 (
-    echo Installing required dependencies...
+    echo [HYDRA] Installing / verifying required security dependencies...
     "%PYTHON_EXE%" -m pip install -r requirements.txt
     echo.
 )
 
+echo [HYDRA] Starting server and local Windows Auth Broker...
 "%PYTHON_EXE%" server.py
 
 if %errorlevel% neq 0 (
