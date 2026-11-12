@@ -26,10 +26,25 @@ echo "  Using Python: $($PYTHON_CMD --version)"
 echo "========================================================"
 echo ""
 
-# Check dependencies
-if ! $PYTHON_CMD -c "import fastapi, uvicorn, qrcode, multipart" &>/dev/null; then
-    echo "Installing required dependencies..."
-    $PYTHON_CMD -m pip install -r requirements.txt
+# 1. Self-healing configuration template check
+if [ ! -f "config.json" ] && [ -f "config.example.json" ]; then
+    echo "[HYDRA] First-time setup: Initializing config.json from template..."
+    cp config.example.json config.json
+fi
+
+# 2. Pre-flight dependency check & binary-preferred installation
+if ! $PYTHON_CMD -c "import fastapi, uvicorn, qrcode, multipart, cryptography, argon2, aiofiles" &>/dev/null; then
+    echo "[HYDRA] Missing dependencies detected. Installing required packages..."
+    $PYTHON_CMD -m pip install --prefer-binary -r requirements.txt || \
+    $PYTHON_CMD -m pip install --only-binary :all: -r requirements.txt
+
+    if ! $PYTHON_CMD -c "import fastapi, uvicorn, qrcode, multipart, cryptography, argon2, aiofiles" &>/dev/null; then
+        echo ""
+        echo "[ERROR] Failed to install required dependencies."
+        echo "Please install manually by running: pip install --prefer-binary -r requirements.txt"
+        exit 1
+    fi
+    echo "[HYDRA] Dependencies verified successfully."
     echo ""
 fi
 

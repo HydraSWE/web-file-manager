@@ -20,11 +20,21 @@ import mimetypes
 from typing import List, Optional
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, Request, Response, Depends, UploadFile, File, Form, Query, Body, status, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, StreamingResponse, JSONResponse, HTMLResponse
-from fastapi.staticfiles import StaticFiles
-from fastapi.middleware.cors import CORSMiddleware
-import uvicorn
+try:
+    from fastapi import FastAPI, HTTPException, Request, Response, Depends, UploadFile, File, Form, Query, Body, status, WebSocket, WebSocketDisconnect
+    from fastapi.responses import FileResponse, StreamingResponse, JSONResponse, HTMLResponse
+    from fastapi.staticfiles import StaticFiles
+    from fastapi.middleware.cors import CORSMiddleware
+    import uvicorn
+except ImportError as _err:
+    print("\n" + "=" * 60)
+    print(f" [HYDRA ERROR] Missing required dependency: {_err.name}")
+    print(" Please install required dependencies by running:")
+    print("     pip install --prefer-binary -r requirements.txt")
+    print(" Or use the startup launcher:")
+    print("     run.bat (Windows)  /  run.sh (Linux/macOS)")
+    print("=" * 60 + "\n")
+    sys.exit(1)
 import urllib.parse
 import json as _json
 
@@ -74,16 +84,35 @@ def load_config() -> dict:
         "allow_permanent_delete": True,
         "show_hidden_files": False,
         "execution": {
-            "enabled": False,
+            "enabled": True,
             "require_authentication": True,
             "require_confirmation": True,
             "allowed_extensions": [".bat", ".cmd", ".ps1", ".py", ".exe"],
             "default_script_mode": "terminal",
             "timeout_seconds": 300,
             "max_concurrent_processes": 3,
-            "allow_desktop_execution": True
+            "allow_desktop_execution": True,
+            "allowed_roots": [],
+            "powershell_override_policy": False
         }
     }
+
+    # Auto-initialize config.json from config.example.json if missing
+    if not os.path.exists(CONFIG_FILE):
+        example_cfg = os.path.join(BASE_DIR, "config.example.json")
+        if os.path.exists(example_cfg):
+            try:
+                import shutil
+                shutil.copyfile(example_cfg, CONFIG_FILE)
+            except Exception:
+                pass
+        else:
+            try:
+                with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+                    json.dump(defaults, f, indent=2)
+            except Exception:
+                pass
+
     if os.path.exists(CONFIG_FILE):
         try:
             with open(CONFIG_FILE, "r", encoding="utf-8") as f:
